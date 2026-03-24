@@ -5,8 +5,6 @@ services:
       dockerfile: docker/jd.Dockerfile
     image: cosmos:latest
     container_name: cosmos
-    volumes:
-      - ..:/root/cosmos-transfer2.5
     deploy:
       resources:
         reservations:

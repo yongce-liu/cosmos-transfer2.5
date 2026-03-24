@@ -39,9 +39,4 @@ RUN cd cosmos-transfer2.5 && \
 RUN cd cosmos-transfer2.5 && \
     uv pip install tyro
 
-RUN cd cosmos-transfer2.5 && \
-    export HF_ENDPOINT=https://hf-mirror.com && \
-    export HF_TOKEN= && \
-    uv run python examples/inference.py -i assets/robot_example/depth/robot_depth_spec.json -o outputs/depth
-
 CMD ["/bin/bash"]
