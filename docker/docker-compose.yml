@@ -14,4 +14,4 @@ services:
               capabilities: [gpu]
     stdin_open: true
     tty: true
-    working_dir: /root/cosmos-transfer2.5
+    working_dir: /workspace/cosmos-transfer2.5
