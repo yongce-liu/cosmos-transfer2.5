@@ -1,0 +1,19 @@
+services:
+  cosmos:
+    build:
+      context: ..
+      dockerfile: docker/jd.Dockerfile
+    image: cosmos:latest
+    container_name: cosmos
+    volumes:
+      - ..:/root/cosmos-transfer2.5
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    stdin_open: true
+    tty: true
+    working_dir: /root/cosmos-transfer2.5
