@@ -1,13 +1,21 @@
-ARG TARGETPLATFORM
-ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.10-py3
-
-FROM ${BASE_IMAGE}
+FROM nvcr.io/nvidia/pytorch:25.10-py3
 
 #####################################################################
 # FOR UBUNTU MIRRORS AMD
-RUN sed -i 's@//.*archive.ubuntu.com@//mirrors.ustc.edu.cn@g' /etc/apt/sources.list && \
-    sed -i 's/security.ubuntu.com/mirrors.ustc.edu.cn/g' /etc/apt/sources.list && \
-    apt-get update --fix-missing && apt-get upgrade -y
+RUN CODENAME=$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2) && \
+    echo "Detected Ubuntu codename: $CODENAME" && \
+    \
+    sed -i 's@//.*archive.ubuntu.com@//mirrors.ustc.edu.cn@g' /etc/apt/sources.list && \
+    sed -i 's@security.ubuntu.com@mirrors.ustc.edu.cn@g' /etc/apt/sources.list && \
+    \
+    find /etc/apt/sources.list.d/ -name "*.list" -type f -exec sed -i \
+    -e 's@//.*archive.ubuntu.com@//mirrors.ustc.edu.cn@g' \
+    -e 's@security.ubuntu.com@mirrors.ustc.edu.cn@g' \
+    -e 's@ppa:.*@# &@g' {} \; && \
+    \
+    apt-get clean && \
+    apt-get update -y && \
+    apt-get upgrade -y
 #####################################################################
 # INSTALL ZSH
 RUN apt-get update && apt-get install zsh git tmux -y && chsh -s /bin/zsh && \
