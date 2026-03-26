@@ -155,7 +155,67 @@ def _hf_download(cmd_args: list[str]) -> str:
 
     Uses a newer Hugging Face CLI version to download checkpoint. The dependency
     version is very old and not robust.
+
+    When 'HF_HUB_OFFLINE=1' is set, skip the network download and resolve the
+    cached path directly using the huggingface_hub Python API.
     """
+    offline = os.environ.get("HF_HUB_OFFLINE", "0") == "1"
+
+    if offline:
+        # Parse cmd_args to extract repo_id, repo_type, revision, and any
+        # positional filename args for cache lookup.
+        # File download format:  [repo_id, "--repo-type", type, "--revision", rev, filename]
+        # Dir download format:   [repo_id, "--repo-type", type, "--revision", rev, "--include", ...]
+        from huggingface_hub import scan_cache_dir
+
+        repo_id = cmd_args[0]
+        repo_type = "model"
+        revision = None
+        filenames = []
+        i = 1
+        while i < len(cmd_args):
+            arg = cmd_args[i]
+            if arg == "--repo-type" and i + 1 < len(cmd_args):
+                repo_type = cmd_args[i + 1]
+                i += 2
+            elif arg == "--revision" and i + 1 < len(cmd_args):
+                revision = cmd_args[i + 1]
+                i += 2
+            elif arg in ("--include", "--exclude"):
+                # These flags consume all following non-flag args
+                i += 1
+                while i < len(cmd_args) and not cmd_args[i].startswith("--"):
+                    i += 1
+            elif arg.startswith("--"):
+                i += 1
+            else:
+                # Positional arg = filename (used by CheckpointFileHf)
+                filenames.append(arg)
+                i += 1
+
+        log.info(f"HF_HUB_OFFLINE=1: resolving cached path for {repo_id}")
+        cache_info = scan_cache_dir()
+        for repo_info in cache_info.repos:
+            if repo_info.repo_id == repo_id and repo_info.repo_type == repo_type:
+                for rev_info in repo_info.revisions:
+                    # Match by commit hash or any ref
+                    if revision and revision != str(rev_info.commit_hash) and revision not in rev_info.refs:
+                        continue
+                    snapshot_path = str(rev_info.snapshot_path)
+                    if filenames:
+                        # File download: return the specific file path
+                        file_path = os.path.join(snapshot_path, filenames[0])
+                        log.info(f"Found cached file: {file_path}")
+                        return file_path
+                    else:
+                        # Directory download: return the snapshot root
+                        log.info(f"Found cached snapshot: {snapshot_path}")
+                        return snapshot_path
+        raise FileNotFoundError(
+            f"Model '{repo_id}' (type={repo_type}) not found in HuggingFace cache. "
+            f"Please download it first or unset HF_HUB_OFFLINE."
+        )
+
     cmd = [
         "uvx",
         f"hf>={_MINIMUM_HF_CLI_VERSION}",
