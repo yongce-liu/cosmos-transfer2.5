@@ -48,13 +48,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 RUN --mount=type=bind,source=packages,target=packages \
     pip install --no-deps packages/* && \
-    pip install hatchling editables
+    pip uninstall pynvml -y  && \
+    pip install hatchling editables nvidia-ml-py
 
 # for vscode
 RUN --mount=type=cache,target=/var/cache/apt \
     --mount=type=cache,target=/var/lib/apt \
     apt-get update --fix-missing && \
-    apt-get install -y --no-install-recommends tini && \
+    apt-get install -y --no-install-recommends tini tmux && \
     apt-get clean && \ 
     apt-get install -y wget && \    
     rm -rf /var/lib/apt/lists/*    
