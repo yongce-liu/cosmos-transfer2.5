@@ -28,12 +28,12 @@ RUN --mount=type=cache,target=/var/cache/apt \
     --mount=type=cache,target=/var/lib/apt \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-        curl \
-        ffmpeg \
-        git \
-        git-lfs \
-        tree \
-        wget
+    curl \
+    ffmpeg \
+    git \
+    git-lfs \
+    tree \
+    wget
 
 # Install uv: https://docs.astral.sh/uv/getting-started/installation/
 # https://github.com/astral-sh/uv-docker-example/blob/main/Dockerfile
@@ -62,11 +62,44 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # We mount the source code to /tmp and copy it to /workspace if in standalone mode.
 ARG STANDALONE
 RUN --mount=type=bind,source=.,target=/tmp/workspace \
-   if [ "$STANDALONE" = "true" ] ; then cp -r /tmp/workspace/* /workspace && just install && rm -rf /workspace/.git ; else echo "Run just install to install all the dependencies at runtime" ; fi
+    if [ "$STANDALONE" = "true" ] ; then cp -r /tmp/workspace/* /workspace && just install && rm -rf /workspace/.git ; else echo "Run just install to install all the dependencies at runtime" ; fi
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --no-cache  \
+    pip \
+    hatchling \
+    editables \
+    ipython \
+    jupyterlab \
+    jupyter \
+    nbclassic \
+    notebook \
+    jupyterlab-lsp \
+    anywidget \
+    lckr_jupyterlab_variableinspector \
+    jupyterlab-spreadsheet-editor && \
+    ln -sf /workspace/.venv/bin/jupyter /usr/bin/jupyter
+
+# for vscode
+RUN --mount=type=cache,target=/var/cache/apt \
+    --mount=type=cache,target=/var/lib/apt \
+    apt-get update --fix-missing && \
+    apt-get install -y --no-install-recommends openssh-server sudo wget && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    apt-get clean && \ 
+    rm -rf /var/lib/apt/lists/*    
+
+RUN cd /opt &&  \   
+    wget https://github.com/coder/code-server/releases/download/v4.105.1/code-server-4.105.1-linux-amd64.tar.gz && \   
+    tar -zxf code-server-4.105.1-linux-amd64.tar.gz && \  
+    mv code-server-4.105.1-linux-amd64 code-server && \    
+    rm -f code-server-4.105.1-linux-amd64.tar.gz
+
+ENV CODE_SERVER_ENABLED=true \ 
+    CODE_SERVER_VERSION=4.105.1
 
 # Place executables in the environment at the front of the path
 ENV PATH="/workspace/.venv/bin:$PATH"
-
-ENTRYPOINT ["/workspace/bin/entrypoint.sh"]
 
 CMD ["/bin/bash"]
