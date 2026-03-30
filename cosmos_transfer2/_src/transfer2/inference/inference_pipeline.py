@@ -658,12 +658,15 @@ class ControlVideo2WorldInference:
                         mask = data_batch[f"control_input_{key}_mask"].to(device=control_input.device)
                         control_input = (control_input + 1) / 2 * mask * 2 - 1
 
+                    # Persist control chunks on CPU so postprocessing and saving do not
+                    # trigger an extra high-resolution GPU allocation on rank 0.
+                    control_input_cpu = control_input.cpu()
                     # Store control input for this chunk
                     if chunk_id == 0:
-                        all_control_chunks[key].append(control_input)
+                        all_control_chunks[key].append(control_input_cpu)
                     else:
                         # For subsequent chunks, only append the non-overlapping frames
-                        all_control_chunks[key].append(control_input[:, :, num_conditional_frames:, :, :])
+                        all_control_chunks[key].append(control_input_cpu[:, :, num_conditional_frames:, :, :])
 
                     if show_control_condition:
                         conditions += [control_input.to(device=video_cat.device)]
