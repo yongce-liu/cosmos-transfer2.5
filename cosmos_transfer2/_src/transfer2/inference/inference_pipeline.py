@@ -402,7 +402,7 @@ class ControlVideo2WorldInference:
                     align_corners=False,
                 )
             ]
-        weight_map = torch.cat(weight_map_i, dim=2).repeat(1, c, 1, 1, 1)
+        weight_map = torch.cat(weight_map_i, dim=2).expand(-1, c, -1, -1, -1)
 
         return weight_map
 
@@ -501,6 +501,13 @@ class ControlVideo2WorldInference:
                     )
                 self.neg_t5_embeddings = neg_text_embeddings
 
+        # [Memory Optimization] Offload text encoder after embeddings are computed
+        if hasattr(self.model, "text_encoder") and self.model.text_encoder is not None:
+            if hasattr(self.model.text_encoder, "model") and self.model.text_encoder.model is not None:
+                log.info("[Memory Optimization] Offloading text encoder to CPU")
+                self.model.text_encoder.model = self.model.text_encoder.model.to("cpu")
+                torch.cuda.empty_cache()
+
         # Process image context if provided; else will be None
         log.info("Processing image context if available...")
         with _maybe_get_timer(self.benchmark_timer, "preprocessing"):
@@ -521,6 +528,8 @@ class ControlVideo2WorldInference:
                 hint_key=hint_key,
                 resolution=resolution,
                 seg_control_prompt=seg_control_prompt,
+                max_frames=max_frames,
+                input_video_frames=input_frames,
             )
 
             # -------- Stuff to handle chunk-wise long video generation --------
@@ -641,7 +650,26 @@ class ControlVideo2WorldInference:
                     sigma_max=sigma_max,
                     num_steps=num_steps,
                 )
+                # [Memory Optimization] Release guided-generation latents before decode.
+                if x0_spatial_condition is not None:
+                    x0_spatial_condition["x0"] = None
+                    x0_spatial_condition["x_sigma_mask"] = None
+                x_sigma_max = None
+
+                # Persist control inputs to CPU before decode so the VAE does not overlap
+                # with the full set of high-resolution conditioning tensors on GPU.
+                control_inputs_cpu = {}
+                for key in hint_key:
+                    control_input = data_batch["control_input_" + key]
+                    if f"control_input_{key}_mask" in data_batch:
+                        mask = data_batch[f"control_input_{key}_mask"].to(device=control_input.device)
+                        control_input = (control_input + 1) / 2 * mask * 2 - 1
+                    control_inputs_cpu[key] = control_input.cpu()
+                del data_batch
+                torch.cuda.empty_cache()
                 video = self.model.decode(sample).cpu()  # Shape: (1, C, T, H, W)
+                del sample
+                torch.cuda.empty_cache()
 
                 # For visualization: concatenate condition and input videos with generated video
                 video_cat = video
@@ -653,14 +681,7 @@ class ControlVideo2WorldInference:
 
                 # Accumulate control inputs for each chunk
                 for key in hint_key:
-                    control_input = data_batch["control_input_" + key]
-                    if f"control_input_{key}_mask" in data_batch:
-                        mask = data_batch[f"control_input_{key}_mask"].to(device=control_input.device)
-                        control_input = (control_input + 1) / 2 * mask * 2 - 1
-
-                    # Persist control chunks on CPU so postprocessing and saving do not
-                    # trigger an extra high-resolution GPU allocation on rank 0.
-                    control_input_cpu = control_input.cpu()
+                    control_input_cpu = control_inputs_cpu[key]
                     # Store control input for this chunk
                     if chunk_id == 0:
                         all_control_chunks[key].append(control_input_cpu)
@@ -669,7 +690,7 @@ class ControlVideo2WorldInference:
                         all_control_chunks[key].append(control_input_cpu[:, :, num_conditional_frames:, :, :])
 
                     if show_control_condition:
-                        conditions += [control_input.to(device=video_cat.device)]
+                        conditions += [control_input_cpu.to(device=video_cat.device)]
 
                 if show_control_condition:
                     video_cat = torch.cat([*conditions, video_cat], dim=-1)

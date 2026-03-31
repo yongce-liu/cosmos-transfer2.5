@@ -251,6 +251,8 @@ class CommonSetupArguments(pydantic.BaseModel):
     The second number represents the splitting factor in width dimension.
     The latent dimensions of the image or video need to be divisible by these values.
     """
+    hierarchical_cp: bool = False
+    """Enable hierarchical context parallelism (A2A + P2P) for CP sizes that do not evenly divide the attention head count."""
 
     @cached_property
     def enable_guardrails(self) -> bool:

@@ -563,7 +563,7 @@ def _compute_depth_maps(video_np: np.ndarray) -> torch.Tensor | None:
         depth_tensor = torch.from_numpy(depth_maps.astype(np.float32))
         d_min, d_max = depth_tensor.min(), depth_tensor.max()
         depth_normalized = (depth_tensor - d_min) / (d_max - d_min + 1e-8) * 255.0
-        depth_normalized = depth_normalized.unsqueeze(0)  # (1, T, H, W)
+        depth_normalized = depth_normalized.round().to(torch.uint8).unsqueeze(0)  # (1, T, H, W)
 
         log.info(color_message(f"✓ Depth computed: {depth_normalized.shape}", "bright_green"))
         return depth_normalized
@@ -629,6 +629,8 @@ def read_and_process_control_input(
     resolution: str = "720",
     seg_control_prompt: str | None = None,
     s3_credential_path: str | None = None,
+    max_frames: int | None = None,
+    input_video_frames: torch.Tensor | None = None,
 ):
     """
     Load or compute control inputs for video transfer.
@@ -645,6 +647,10 @@ def read_and_process_control_input(
         resolution: Target resolution for processing (e.g., '720', '1080')
         seg_control_prompt: Text prompt for SAM2 segmentation
         s3_credential_path: Path to S3 credentials file
+        max_frames: Maximum number of frames to load/process for control inputs.
+        input_video_frames: Already-loaded input video frames in (C, T, H, W) uint8 format.
+            When provided, on-the-fly depth reuses these resized frames instead of loading
+            the full source video again.
 
     Returns:
         Tuple of (control_input_dict, mask_video_dict) where mask_video_dict contains
@@ -652,6 +658,8 @@ def read_and_process_control_input(
     """
     control_input_dict = {}
     mask_video_dict = {}
+    control_num_total_frames = NUM_MAX_FRAMES if max_frames is None else max_frames
+    control_read_max_frames = -1 if max_frames is None else max_frames
 
     # Configuration for each modality
     modality_config = {
@@ -694,6 +702,7 @@ def read_and_process_control_input(
             # Load pre-computed control input
             control_attr, fps, _, _ = read_and_resize_input(
                 control_path,
+                num_total_frames=control_num_total_frames,
                 resolution=resolution,
                 interpolation=config["interpolation"],
                 s3_credential_path=s3_credential_path,
@@ -710,37 +719,45 @@ def read_and_process_control_input(
                     segment(input_video=video_path, prompt=seg_control_prompt, output_video=temp_output_video.name)
                     control_attr, fps, _, _ = read_and_resize_input(
                         temp_output_video.name,
+                        num_total_frames=control_num_total_frames,
                         resolution=resolution,
                         interpolation=config["interpolation"],
                         s3_credential_path=s3_credential_path,
                     )
                     control_input_dict["control_input_seg"] = control_attr
             elif modality == "depth":
-                # Load video at original resolution, compute depth, then resize
-                video_frames, _ = read_video_or_image_into_frames_BCTHW(
-                    video_path,
-                    H=None,
-                    W=None,
-                    normalize=False,
-                    max_frames=-1,
-                    also_return_fps=True,
-                    s3_credential_path=s3_credential_path,
-                )
-                # Convert to (T, H, W, C) format for depth models
-                if isinstance(video_frames, torch.Tensor):
-                    video_np = einops.rearrange(video_frames[0].cpu().numpy(), "c t h w -> t h w c")
+                if input_video_frames is not None:
+                    log.info("Reusing preprocessed input frames for on-the-fly depth computation.")
+                    video_np = einops.rearrange(input_video_frames.cpu().numpy(), "c t h w -> t h w c")
                 else:
-                    video_np = einops.rearrange(video_frames[0], "c t h w -> t h w c")
-                video_np = np.clip(video_np, 0, 255).astype(np.uint8)
+                    # Fallback for callers that do not already have the resized frames available.
+                    video_frames, _ = read_video_or_image_into_frames_BCTHW(
+                        video_path,
+                        H=None,
+                        W=None,
+                        normalize=False,
+                        max_frames=control_read_max_frames,
+                        also_return_fps=True,
+                        s3_credential_path=s3_credential_path,
+                    )
+                    # Convert to (T, H, W, C) format for depth models
+                    if isinstance(video_frames, torch.Tensor):
+                        video_np = einops.rearrange(video_frames[0].cpu().numpy(), "c t h w -> t h w c")
+                    else:
+                        video_np = einops.rearrange(video_frames[0], "c t h w -> t h w c")
+                video_np = np.clip(video_np, 0, 255).astype(np.uint8, copy=False)
 
                 depth_computed = _compute_depth_maps(video_np)
                 if depth_computed is not None:
                     depth_rgb = depth_computed.expand(3, -1, -1, -1)  # (3, T, H, W)
-                    control_input_dict[control_key] = _resize_to_target_resolution(
-                        depth_rgb,
-                        resolution=resolution,
-                        interpolation=config["interpolation"],
-                    )
+                    if input_video_frames is not None:
+                        control_input_dict[control_key] = depth_rgb
+                    else:
+                        control_input_dict[control_key] = _resize_to_target_resolution(
+                            depth_rgb,
+                            resolution=resolution,
+                            interpolation=config["interpolation"],
+                        )
                 else:
                     control_input_dict[control_key] = None
 
@@ -760,6 +777,7 @@ def read_and_process_control_input(
         if control_mask_path:
             control_mask_attr, fps, _, _ = read_and_resize_input(
                 control_mask_path,
+                num_total_frames=control_num_total_frames,
                 resolution=resolution,
                 interpolation=cv2.INTER_LINEAR,
                 s3_credential_path=s3_credential_path,

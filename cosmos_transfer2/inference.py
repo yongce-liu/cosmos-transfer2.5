@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +36,8 @@ from cosmos_transfer2.config import (
     is_rank0,
     path_to_str,
 )
+
+SINGLEVIEW_NUM_ATTENTION_HEADS = 16
 
 
 class Control2WorldInference:
@@ -74,6 +77,7 @@ class Control2WorldInference:
         torch.enable_grad(False)  # Disable gradient calculations for inference
 
         self.device_rank = 0
+        hierarchical_cp = False
 
         process_group = None
         # pyrefly: ignore  # unsupported-operation
@@ -82,8 +86,30 @@ class Control2WorldInference:
 
             distributed.init()
 
+            hierarchical_context_parallel_sizes = None
+            if args.hierarchical_cp:
+                hierarchical_cp = True
+                a2a_size = math.gcd(args.context_parallel_size, SINGLEVIEW_NUM_ATTENTION_HEADS)
+                p2p_size = max(1, args.context_parallel_size // a2a_size)
+                hierarchical_context_parallel_sizes = [a2a_size, p2p_size]
+            elif SINGLEVIEW_NUM_ATTENTION_HEADS % args.context_parallel_size != 0:
+                valid_sizes = [
+                    size
+                    for size in range(1, SINGLEVIEW_NUM_ATTENTION_HEADS + 1)
+                    if SINGLEVIEW_NUM_ATTENTION_HEADS % size == 0
+                ]
+                raise ValueError(
+                    "Unsupported context_parallel_size="
+                    f"{args.context_parallel_size} for single-view inference: the default minimal_a2a attention "
+                    f"backend uses {SINGLEVIEW_NUM_ATTENTION_HEADS} heads, so cp_size must divide the head count. "
+                    f"Use one of {valid_sizes}, or rerun with --hierarchical-cp to enable A2A+P2P context parallelism."
+                )
+
             # pyrefly: ignore  # bad-argument-type
-            parallel_state.initialize_model_parallel(context_parallel_size=args.context_parallel_size)
+            parallel_state.initialize_model_parallel(
+                context_parallel_size=args.context_parallel_size,
+                hierarchical_context_parallel_sizes=hierarchical_context_parallel_sizes,
+            )
             process_group = parallel_state.get_context_parallel_group()
             self.device_rank = distributed.get_rank(process_group)
 
@@ -132,6 +158,7 @@ class Control2WorldInference:
             wan_cp_grid=args.parallel_tokenizer_grid,
             benchmark_timer=self.benchmark_timer if args.benchmark else None,
             config_file=args.config_file,
+            hierarchical_cp=hierarchical_cp,
         )
 
         # For distilled models, disable net_fake_score (not needed for inference)
