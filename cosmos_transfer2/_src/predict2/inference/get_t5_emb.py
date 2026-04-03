@@ -172,3 +172,16 @@ def get_text_embedding(
         max_length=max_length,
         return_mask=return_mask,
     )
+
+
+def offload_text_encoder(device: str = "cpu", empty_cache: bool = True) -> None:
+    """Move the cached global text encoder off GPU after embeddings are computed."""
+    global cosmos_encoder
+
+    if cosmos_encoder is None:
+        return
+
+    cosmos_encoder.text_encoder.to(device)
+    cosmos_encoder.device = device
+    if empty_cache and device == "cpu" and torch.cuda.is_available():
+        torch.cuda.empty_cache()

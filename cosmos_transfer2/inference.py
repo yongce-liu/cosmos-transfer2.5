@@ -45,6 +45,7 @@ class Control2WorldInference:
         self,
         args: SetupArguments,
         batch_hint_keys: list[str],
+        disable_text_encoder: bool = False,
     ) -> None:
         log.debug(f"{args.__class__.__name__}({args})({batch_hint_keys})")
         self.setup_args = args
@@ -146,6 +147,10 @@ class Control2WorldInference:
             registered_exp_name = EXPERIMENTS[self.experiment].registered_exp_name
             exp_override_opts = EXPERIMENTS[self.experiment].command_args.copy()
 
+        if disable_text_encoder:
+            log.info("All samples are control_only=True, disabling text encoder initialization.")
+            exp_override_opts.append("model.config.text_encoder_config.compute_online=False")
+
         # Initialize the inference pipeline - same class for both distilled and non-distilled
         self.inference_pipeline = ControlVideo2WorldInference(
             # pyrefly: ignore [bad-argument-type]
@@ -213,15 +218,20 @@ class Control2WorldInference:
         log.debug(f"{sample.__class__.__name__}({sample})")
         output_path = output_dir / sample.name
 
-        assert sample.prompt is not None
-        prompt: str = sample.prompt
+        prompt = sample.prompt if sample.prompt is not None else ""
+        control_only = sample.control_only
+        prompt_embedding_path = path_to_str(sample.prompt_embedding_path)
+        guidance = 0 if control_only else sample.guidance
+        use_cfg = (not self.is_distilled) and guidance > 0
 
-        # For distilled models, negative_prompt is not needed (CFG is distilled into the model)
-        if self.is_distilled:
+        # For distilled models and no-CFG runs, negative prompt is not needed.
+        if self.is_distilled or not use_cfg:
             negative_prompt = None
+            negative_prompt_embedding_path = None
         else:
             assert sample.negative_prompt is not None
             negative_prompt = sample.negative_prompt
+            negative_prompt_embedding_path = path_to_str(sample.negative_prompt_embedding_path)
 
         guided_generation_mask = (
             str(sample.guided_generation_mask) if sample.guided_generation_mask is not None else None
@@ -233,10 +243,18 @@ class Control2WorldInference:
             output_dir.mkdir(parents=True, exist_ok=True)
             open(f"{output_path}.json", "w").write(sample.model_dump_json())
             log.info(f"Saved arguments to {output_path}.json")
+            if control_only and prompt_embedding_path is not None:
+                log.info(
+                    "control_only=True: using precomputed prompt embeddings and disabling classifier-free guidance."
+                )
+            elif control_only:
+                log.info("control_only=True: using zero text embeddings and disabling classifier-free guidance.")
+            elif sample.guidance == 0:
+                log.info("guidance=0: skipping classifier-free guidance and ignoring negative prompt.")
 
             with self.benchmark_timer("text_guardrail"):
                 # run text guardrail on the prompt
-                if self.text_guardrail_runner is not None:
+                if self.text_guardrail_runner is not None and prompt:
                     log.info("Running guardrail check on prompt...")
 
                     if not guardrail_presets.run_text_guardrail(prompt, self.text_guardrail_runner):
@@ -262,7 +280,7 @@ class Control2WorldInference:
                                 raise Exception(message)
                         else:
                             log.success("Passed guardrail on negative prompt")
-                elif self.text_guardrail_runner is None:
+                elif self.text_guardrail_runner is None and prompt:
                     log.warning("Guardrail checks on prompt are disabled")
 
         input_control_video_paths = sample.control_modalities
@@ -280,20 +298,31 @@ class Control2WorldInference:
         if self.setup_args.benchmark:
             torch.cuda.synchronize()
 
+        stream_output = self.video_guardrail_runner is None and sample.max_frames != 1
+        stream_output_path = f"{output_path}.mp4" if stream_output and self.device_rank == 0 else None
+        stream_control_paths = (
+            {key: f"{output_path}_control_{key}.mp4" for key in sample.hint_keys}
+            if stream_output and self.device_rank == 0
+            else None
+        )
+
         with self.benchmark_timer("generate_img2world"):
             # For distilled models, guidance is not needed (CFG is distilled into the model)
-            guidance = None if self.is_distilled else sample.guidance
+            runtime_guidance = None if self.is_distilled else guidance
             # Run model inference
             output_video, control_video_dict, mask_video_dict, fps, _ = self.inference_pipeline.generate_img2world(
                 # pyrefly: ignore  # bad-argument-type
                 video_path=path_to_str(sample.video_path),
                 prompt=prompt,
+                prompt_embedding_path=prompt_embedding_path,
                 negative_prompt=negative_prompt,
+                negative_prompt_embedding_path=negative_prompt_embedding_path,
+                control_only=control_only,
                 image_context_path=path_to_str(sample.image_context_path),
                 context_frame_idx=sample.context_frame_index,
                 max_frames=sample.max_frames,
                 # pyrefly: ignore [bad-argument-type]
-                guidance=guidance,
+                guidance=runtime_guidance,
                 seed=sample.seed,
                 resolution=sample.resolution,
                 control_weight=control_weight,
@@ -313,16 +342,19 @@ class Control2WorldInference:
                 guided_generation_mask=guided_generation_mask,
                 guided_generation_step_threshold=guided_generation_step_threshold,
                 guided_generation_foreground_labels=guided_generation_foreground_labels,
+                stream_output=stream_output,
+                stream_output_path=stream_output_path,
+                stream_control_paths=stream_control_paths,
             )
             if self.setup_args.benchmark:
                 torch.cuda.synchronize()
 
-        if output_video.shape[2] == 1:
+        if output_video is not None and output_video.shape[2] == 1:
             ext = "jpg"
         else:
             ext = "mp4"
 
-        if self.is_distilled and output_video.shape[2] > 93:
+        if self.is_distilled and output_video is not None and output_video.shape[2] > 93:
             log.warning(
                 "Generated output has "
                 f"{output_video.shape[2]} frames (> 93). "
@@ -331,18 +363,18 @@ class Control2WorldInference:
 
         # Save video/image
         if self.device_rank == 0:
-            output_video = (1.0 + output_video[0]) / 2
-            for key in control_video_dict:
-                control_video_dict[key] = (1.0 + control_video_dict[key][0]) / 2
-                save_img_or_video(control_video_dict[key], f"{output_path}_control_{key}", fps=fps)
-                log.info(f"{key} control video saved to {output_path}_control_{key}.{ext}")
-
             with self.benchmark_timer("video_guardrail"):
                 for key in mask_video_dict:
                     save_img_or_video(mask_video_dict[key], f"{output_path}_mask_{key}", fps=fps)
                     log.info(f"Mask for {key} saved to {output_path}_mask_{key}.{ext}")
                 # run video guardrail on the video
                 if self.video_guardrail_runner is not None:
+                    assert output_video is not None, "Video guardrail requires the full output video tensor."
+                    output_video = (1.0 + output_video[0]) / 2
+                    for key in control_video_dict:
+                        control_video_dict[key] = (1.0 + control_video_dict[key][0]) / 2
+                        save_img_or_video(control_video_dict[key], f"{output_path}_control_{key}", fps=fps)
+                        log.info(f"{key} control video saved to {output_path}_control_{key}.{ext}")
                     log.info("Running guardrail check on video...")
                     frames = (output_video * 255.0).clamp(0.0, 255.0).to(torch.uint8)
                     frames = frames.permute(1, 2, 3, 0).cpu().numpy().astype(np.uint8)  # (T, H, W, C)
@@ -358,15 +390,23 @@ class Control2WorldInference:
                     # Convert processed frames back to tensor format
                     processed_video = torch.from_numpy(processed_frames).float().permute(3, 0, 1, 2) / 255.0
                     output_video = processed_video.to(output_video.device, dtype=output_video.dtype)
+                    save_img_or_video(output_video, str(output_path), fps=fps)
                 else:
                     log.warning("Guardrail checks on video are disabled")
-
-            # Remove batch dimension and normalize to [0, 1] range
-            save_img_or_video(output_video, str(output_path), fps=fps)
+                    if output_video is not None:
+                        output_video = (1.0 + output_video[0]) / 2
+                        for key in control_video_dict:
+                            control_video_dict[key] = (1.0 + control_video_dict[key][0]) / 2
+                            save_img_or_video(control_video_dict[key], f"{output_path}_control_{key}", fps=fps)
+                            log.info(f"{key} control video saved to {output_path}_control_{key}.{ext}")
+                        save_img_or_video(output_video, str(output_path), fps=fps)
+                    else:
+                        for key in sample.hint_keys:
+                            log.info(f"{key} control video saved to {output_path}_control_{key}.mp4")
             # save prompt
             prompt_save_path = f"{output_path}.txt"
             with open(prompt_save_path, "w") as f:
-                f.write(sample.prompt)
+                f.write(prompt)
             log.success(f"Generated video saved to {output_path}.{ext}")
 
         if sample_id == 0 and self.setup_args.benchmark:

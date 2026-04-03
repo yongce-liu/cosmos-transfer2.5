@@ -64,6 +64,42 @@ def create_random_control_inputs(hint_keys=["edge"], batch_size=1, num_frames=93
     return control_dict
 
 
+@pytest.mark.L1
+def test_resolve_image_context_source_falls_back_to_first_frame():
+    """Image-context models should default to the first input-video frame when no reference is provided."""
+    pipeline = ControlVideo2WorldInference.__new__(ControlVideo2WorldInference)
+    pipeline.model = MagicMock()
+    pipeline.model.net = MagicMock()
+    pipeline.model.net.extra_image_context_dim = 1152
+
+    image_context_path, context_frame_idx = pipeline._resolve_image_context_source(
+        image_context_path=None,
+        context_frame_idx=None,
+        video_path="input.mp4",
+    )
+
+    assert image_context_path == "input.mp4"
+    assert context_frame_idx == 0
+
+
+@pytest.mark.L1
+def test_resolve_image_context_source_preserves_none_for_non_image_context_models():
+    """Non-image-context models should keep the previous no-op behavior."""
+    pipeline = ControlVideo2WorldInference.__new__(ControlVideo2WorldInference)
+    pipeline.model = MagicMock()
+    pipeline.model.net = MagicMock()
+    pipeline.model.net.extra_image_context_dim = None
+
+    image_context_path, context_frame_idx = pipeline._resolve_image_context_source(
+        image_context_path=None,
+        context_frame_idx=None,
+        video_path="input.mp4",
+    )
+
+    assert image_context_path is None
+    assert context_frame_idx is None
+
+
 def get_test_video2world_config():
     """Create a minimal test config for Video2WorldModel that supports 93 frames."""
     from omegaconf import DictConfig

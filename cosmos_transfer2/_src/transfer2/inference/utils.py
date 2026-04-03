@@ -15,10 +15,12 @@
 
 import hashlib
 import json
+import math
 import os
 import pickle
 import tempfile
 import time
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import cv2
@@ -29,8 +31,14 @@ import torch
 
 from cosmos_transfer2._src.imaginaire.utils import distributed, log
 from cosmos_transfer2._src.imaginaire.utils.easy_io import easy_io
+from cosmos_transfer2._src.imaginaire.utils.embedding_concat_strategy import EmbeddingConcatStrategy
 from cosmos_transfer2._src.predict2.datasets.utils import VIDEO_RES_SIZE_INFO
-from cosmos_transfer2._src.predict2.inference.get_t5_emb import get_text_embedding
+from cosmos_transfer2._src.predict2.inference.get_t5_emb import (
+    CosmosT5TextEncoderConfig,
+    get_text_embedding,
+    offload_text_encoder,
+)
+from cosmos_transfer2._src.predict2.text_encoders.text_encoder import NUM_EMBEDDING_PADDING_TOKENS
 from cosmos_transfer2._src.transfer2.auxiliary.sam2.sam2_model import VideoSegmentationModel
 
 _VIDEO_EXTENSIONS = [".mp4", ".avi", ".mov", ".mkv", ".webm"]
@@ -41,6 +49,7 @@ NUM_MAX_FRAMES = 5000
 DUMMY_PROMPT = "The video captures a stunning, photorealistic scene with remarkable attention to detail, giving it a lifelike appearance that is almost indistinguishable from reality. It appears to be from a high-budget 4K movie, showcasing ultra-high-definition quality with impeccable resolution."
 
 DEFAULT_NEG_T5_PROMPT_EMBEDDING_PATH = "s3://bucket/projects/edify_video/v4/video_neg_prompt_embeddings_v0.pt"
+CONTROL_CACHE_VERSION = "v1"
 
 
 def download_from_s3_with_cache(
@@ -181,6 +190,103 @@ def detect_aspect_ratio(img_size: tuple[int, int]) -> str:
     current_ratio = w / h
     closest_aspect_ratio = np.argmin((_aspect_ratios - current_ratio) ** 2)
     return _aspect_ratio_keys[closest_aspect_ratio]
+
+
+def get_control_cache_dir() -> Path:
+    """Return the local cache directory used for expensive on-the-fly controls."""
+    cache_root = os.environ.get(
+        "COSMOS_CONTROL_CACHE_DIR",
+        os.path.join(tempfile.gettempdir(), "cosmos_transfer2_control_cache"),
+    )
+    cache_dir = Path(cache_root)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def build_control_cache_path(
+    *,
+    video_path: str,
+    modality: str,
+    resolution: str,
+    max_frames: int | None,
+    seg_control_prompt: str | None = None,
+) -> Path:
+    """Build a stable cache path for a derived control tensor."""
+    resolved_video_path = Path(video_path).expanduser().resolve(strict=False)
+    payload = {
+        "version": CONTROL_CACHE_VERSION,
+        "video_path": str(resolved_video_path),
+        "modality": modality,
+        "resolution": resolution,
+        "max_frames": max_frames,
+        "seg_control_prompt": seg_control_prompt,
+    }
+    try:
+        stat = resolved_video_path.stat()
+        payload["mtime_ns"] = stat.st_mtime_ns
+        payload["size"] = stat.st_size
+    except FileNotFoundError:
+        payload["mtime_ns"] = None
+        payload["size"] = None
+
+    cache_key = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    return get_control_cache_dir() / f"{cache_key}.pt"
+
+
+def _load_cached_control_tensor(cache_path: Path) -> torch.Tensor | None:
+    """Load a cached control tensor if present and valid."""
+    if not cache_path.exists():
+        return None
+
+    try:
+        tensor = torch.load(cache_path, map_location="cpu")
+    except Exception as exc:
+        log.warning(f"Failed to load cached control input from {cache_path}: {exc}. Recomputing.")
+        cache_path.unlink(missing_ok=True)
+        return None
+
+    if not isinstance(tensor, torch.Tensor):
+        log.warning(f"Unexpected cached control input type at {cache_path}: {type(tensor)}. Recomputing.")
+        cache_path.unlink(missing_ok=True)
+        return None
+
+    return tensor
+
+
+def _save_cached_control_tensor(cache_path: Path, tensor: torch.Tensor) -> None:
+    """Persist a CPU tensor atomically so other ranks can reuse it."""
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = cache_path.with_suffix(f"{cache_path.suffix}.tmp.{os.getpid()}")
+    torch.save(tensor.cpu(), tmp_path)
+    os.replace(tmp_path, cache_path)
+
+
+def compute_or_load_shared_control_tensor(
+    cache_path: Path,
+    compute_fn: Callable[[], torch.Tensor | None],
+) -> torch.Tensor | None:
+    """Reuse a cached control tensor across ranks and across repeated runs."""
+    cached_tensor = _load_cached_control_tensor(cache_path)
+    if cached_tensor is not None:
+        return cached_tensor
+
+    world_size = distributed.get_world_size()
+    tensor: torch.Tensor | None = None
+
+    if world_size > 1:
+        if distributed.is_rank0():
+            tensor = compute_fn()
+            if tensor is not None:
+                _save_cached_control_tensor(cache_path, tensor)
+        distributed.barrier()
+        if tensor is None:
+            tensor = _load_cached_control_tensor(cache_path)
+        return tensor
+
+    tensor = compute_fn()
+    if tensor is not None:
+        _save_cached_control_tensor(cache_path, tensor)
+    return tensor
 
 
 def read_video_or_image_into_frames_BCTHW(
@@ -478,6 +584,144 @@ def get_t5_from_prompt(prompt, positive_prompt="", text_encoder_class="T5", cach
     return t5_embed
 
 
+def load_precomputed_text_embeddings(
+    embedding_path: str,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Load a precomputed prompt embedding from a local tensor or numpy file."""
+    suffix = Path(embedding_path).suffix.lower()
+    if suffix in {".pt", ".pth", ".bin"}:
+        payload = torch.load(embedding_path, map_location="cpu")
+    elif suffix == ".npy":
+        payload = np.load(embedding_path, allow_pickle=False)
+    elif suffix == ".npz":
+        with np.load(embedding_path, allow_pickle=False) as payload:
+            payload = {key: payload[key] for key in payload.files}
+    else:
+        raise ValueError(
+            f"Unsupported embedding file format for {embedding_path}. Expected .pt, .pth, .bin, .npy, or .npz."
+        )
+
+    if isinstance(payload, dict):
+        preferred_keys = ("t5_text_embeddings", "text_embeddings", "embedding", "embeddings")
+        for key in preferred_keys:
+            if key in payload:
+                payload = payload[key]
+                break
+        else:
+            if len(payload) != 1:
+                raise ValueError(
+                    f"Could not infer embedding tensor from {embedding_path}. "
+                    f"Expected one tensor or one of keys {preferred_keys}."
+                )
+            payload = next(iter(payload.values()))
+
+    embedding = payload if isinstance(payload, torch.Tensor) else torch.as_tensor(payload)
+    if embedding.ndim == 2:
+        embedding = embedding.unsqueeze(0)
+    if embedding.ndim != 3:
+        raise ValueError(
+            f"Expected embedding tensor from {embedding_path} to have 2 or 3 dimensions, got {embedding.shape}."
+        )
+    return embedding.to(device=device, dtype=dtype)
+
+
+def get_zero_text_embeddings(
+    prompt=None,
+    text_encoder_class: str = "T5",
+    text_encoder_config: Any = None,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.bfloat16,
+):
+    """Construct zero-valued text embeddings without loading the text encoder."""
+    if isinstance(prompt, list):
+        return [
+            get_zero_text_embeddings(
+                p,
+                text_encoder_class=text_encoder_class,
+                text_encoder_config=text_encoder_config,
+                device=device,
+                dtype=dtype,
+            )
+            for p in prompt
+        ]
+    if isinstance(prompt, dict):
+        return [
+            get_zero_text_embeddings(
+                p,
+                text_encoder_class=text_encoder_class,
+                text_encoder_config=text_encoder_config,
+                device=device,
+                dtype=dtype,
+            )
+            for p in prompt.values()
+        ]
+    if isinstance(prompt, torch.Tensor):
+        zero_embed = prompt.unsqueeze(0) if prompt.ndim == 2 else prompt
+        return torch.zeros_like(zero_embed, dtype=dtype, device=device)
+    num_tokens, embed_dim = _get_zero_text_embedding_shape(
+        text_encoder_class=text_encoder_class,
+        text_encoder_config=text_encoder_config,
+    )
+    return torch.zeros(
+        (1, num_tokens, embed_dim),
+        dtype=dtype,
+        device=device,
+    )
+
+
+def _get_zero_text_embedding_shape(text_encoder_class: str, text_encoder_config: Any) -> tuple[int, int]:
+    if text_encoder_class == "T5":
+        return CosmosT5TextEncoderConfig.NUM_TOKENS, CosmosT5TextEncoderConfig.EMBED_DIM
+
+    if text_encoder_config is None:
+        raise NotImplementedError(
+            f"Zero text embeddings require text_encoder_config for non-T5 encoders, got {text_encoder_class}"
+        )
+
+    hidden_size = _get_config_value(text_encoder_config, "model_config", "model_config", "hidden_size")
+    num_hidden_layers = _get_config_value(text_encoder_config, "model_config", "model_config", "num_hidden_layers")
+    if hidden_size is None or num_hidden_layers is None:
+        raise NotImplementedError(
+            f"Cannot infer zero text embedding shape for {text_encoder_class} from text_encoder_config"
+        )
+
+    concat_strategy = _get_config_value(
+        text_encoder_config,
+        "embedding_concat_strategy",
+        default=str(EmbeddingConcatStrategy.MEAN_POOLING),
+    )
+    if concat_strategy == str(EmbeddingConcatStrategy.FULL_CONCAT):
+        embed_dim = int(hidden_size) * int(num_hidden_layers)
+    elif concat_strategy == str(EmbeddingConcatStrategy.MEAN_POOLING):
+        embed_dim = int(hidden_size)
+    elif concat_strategy == str(EmbeddingConcatStrategy.POOL_EVERY_N_LAYERS_AND_CONCAT):
+        n_layers_per_group = int(_get_config_value(text_encoder_config, "n_layers_per_group", default=1))
+        embed_dim = int(hidden_size) * math.ceil(int(num_hidden_layers) / max(1, n_layers_per_group))
+    else:
+        raise NotImplementedError(f"Unsupported embedding concat strategy for zero text embeddings: {concat_strategy}")
+
+    return NUM_EMBEDDING_PADDING_TOKENS, embed_dim
+
+
+def _get_config_value(config: Any, *path: str, default: Any = None) -> Any:
+    current = config
+    for key in path:
+        if current is None:
+            return default
+        if isinstance(current, dict):
+            current = current.get(key, default)
+        else:
+            current = getattr(current, key, default)
+    return current
+
+
+def offload_t5_text_encoder() -> None:
+    """Release T5 GPU memory once prompt embeddings have been materialized."""
+    offload_text_encoder(device="cpu")
+
+
 def get_negative_prompt_embedding(
     negative_prompt=None, text_encoder_class="T5", cache_dir=None, s3_credential_path=None, imaginaire_model=None
 ):
@@ -656,6 +900,7 @@ def read_and_process_control_input(
         Tuple of (control_input_dict, mask_video_dict) where mask_video_dict contains
         autogenerated masks
     """
+    input_control_paths = input_control_paths or {}
     control_input_dict = {}
     mask_video_dict = {}
     control_num_total_frames = NUM_MAX_FRAMES if max_frames is None else max_frames
@@ -713,53 +958,73 @@ def read_and_process_control_input(
             # For depth/seg: computed here using third party models
             # For edge/vis: skip (computed by augmentor)
             if modality == "seg":
-                log.info(f"Computing seg masks on the fly with prompt {seg_control_prompt=}.")
-                segment = VideoSegmentationModel()
-                with tempfile.NamedTemporaryFile(suffix=".mp4") as temp_output_video:
-                    segment(input_video=video_path, prompt=seg_control_prompt, output_video=temp_output_video.name)
-                    control_attr, fps, _, _ = read_and_resize_input(
-                        temp_output_video.name,
-                        num_total_frames=control_num_total_frames,
-                        resolution=resolution,
-                        interpolation=config["interpolation"],
-                        s3_credential_path=s3_credential_path,
-                    )
-                    control_input_dict["control_input_seg"] = control_attr
-            elif modality == "depth":
-                if input_video_frames is not None:
-                    log.info("Reusing preprocessed input frames for on-the-fly depth computation.")
-                    video_np = einops.rearrange(input_video_frames.cpu().numpy(), "c t h w -> t h w c")
-                else:
-                    # Fallback for callers that do not already have the resized frames available.
-                    video_frames, _ = read_video_or_image_into_frames_BCTHW(
-                        video_path,
-                        H=None,
-                        W=None,
-                        normalize=False,
-                        max_frames=control_read_max_frames,
-                        also_return_fps=True,
-                        s3_credential_path=s3_credential_path,
-                    )
-                    # Convert to (T, H, W, C) format for depth models
-                    if isinstance(video_frames, torch.Tensor):
-                        video_np = einops.rearrange(video_frames[0].cpu().numpy(), "c t h w -> t h w c")
-                    else:
-                        video_np = einops.rearrange(video_frames[0], "c t h w -> t h w c")
-                video_np = np.clip(video_np, 0, 255).astype(np.uint8, copy=False)
+                cache_path = build_control_cache_path(
+                    video_path=video_path,
+                    modality=modality,
+                    resolution=resolution,
+                    max_frames=max_frames,
+                    seg_control_prompt=seg_control_prompt,
+                )
 
-                depth_computed = _compute_depth_maps(video_np)
-                if depth_computed is not None:
-                    depth_rgb = depth_computed.expand(3, -1, -1, -1)  # (3, T, H, W)
-                    if input_video_frames is not None:
-                        control_input_dict[control_key] = depth_rgb
-                    else:
-                        control_input_dict[control_key] = _resize_to_target_resolution(
-                            depth_rgb,
+                def compute_seg() -> torch.Tensor | None:
+                    log.info(f"Computing seg masks on the fly with prompt {seg_control_prompt=}.")
+                    segment = VideoSegmentationModel()
+                    with tempfile.NamedTemporaryFile(suffix=".mp4") as temp_output_video:
+                        segment(input_video=video_path, prompt=seg_control_prompt, output_video=temp_output_video.name)
+                        control_attr, _, _, _ = read_and_resize_input(
+                            temp_output_video.name,
+                            num_total_frames=control_num_total_frames,
                             resolution=resolution,
                             interpolation=config["interpolation"],
+                            s3_credential_path=s3_credential_path,
                         )
-                else:
-                    control_input_dict[control_key] = None
+                    return control_attr.cpu()
+
+                control_input_dict["control_input_seg"] = compute_or_load_shared_control_tensor(cache_path, compute_seg)
+            elif modality == "depth":
+                cache_path = build_control_cache_path(
+                    video_path=video_path,
+                    modality=modality,
+                    resolution=resolution,
+                    max_frames=max_frames,
+                )
+
+                def compute_depth() -> torch.Tensor | None:
+                    if input_video_frames is not None:
+                        log.info("Reusing preprocessed input frames for on-the-fly depth computation.")
+                        video_np = einops.rearrange(input_video_frames.cpu().numpy(), "c t h w -> t h w c")
+                    else:
+                        # Fallback for callers that do not already have the resized frames available.
+                        video_frames, _ = read_video_or_image_into_frames_BCTHW(
+                            video_path,
+                            H=None,
+                            W=None,
+                            normalize=False,
+                            max_frames=control_read_max_frames,
+                            also_return_fps=True,
+                            s3_credential_path=s3_credential_path,
+                        )
+                        # Convert to (T, H, W, C) format for depth models
+                        if isinstance(video_frames, torch.Tensor):
+                            video_np = einops.rearrange(video_frames[0].cpu().numpy(), "c t h w -> t h w c")
+                        else:
+                            video_np = einops.rearrange(video_frames[0], "c t h w -> t h w c")
+                    video_np = np.clip(video_np, 0, 255).astype(np.uint8, copy=False)
+
+                    depth_computed = _compute_depth_maps(video_np)
+                    if depth_computed is None:
+                        return None
+
+                    depth_rgb = depth_computed.expand(3, -1, -1, -1)  # (3, T, H, W)
+                    if input_video_frames is not None:
+                        return depth_rgb.cpu()
+                    return _resize_to_target_resolution(
+                        depth_rgb,
+                        resolution=resolution,
+                        interpolation=config["interpolation"],
+                    ).cpu()
+
+                control_input_dict[control_key] = compute_or_load_shared_control_tensor(cache_path, compute_depth)
 
         control_mask_path = input_control_paths.get(f"{modality}_mask")
         mask_prompt = input_control_paths.get(f"{modality}_mask_prompt")

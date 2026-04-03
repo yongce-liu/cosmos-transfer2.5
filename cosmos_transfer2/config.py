@@ -490,7 +490,7 @@ class InferenceArguments(CommonInferenceArguments):
     """Index of a frame in the input video to use as image context. If provided, this image is used as a style reference for the output."""
     image_context_path: ResolvedFilePath | None = None
     """Path to an image file. If provided, this image is used as a style reference for the output. Ignored if {context_frame_index} is provided.
-    If None and {context_frame_idx} is not provided, use a random frame from the input video."""
+    If None and {context_frame_index} is not provided, models with image-context support fall back to the first frame of the input video."""
 
     num_conditional_frames: Literal[0, 1, 2] = 1
     """Used for chunk-wise long video generation. Number of frames from the previously-generated chunk to condition the next chunk on. 
@@ -503,6 +503,8 @@ class InferenceArguments(CommonInferenceArguments):
     """Number of video frames per chunk in the chunk-wise long video generation."""
     num_steps: pydantic.PositiveInt = 1 if SMOKE else 35
     """Number of sampling steps in the diffusion process. Higher values produce better quality but require more time."""
+    control_only: bool = False
+    """Disable classifier-free guidance for lower-VRAM control-driven transfer. When enabled, guidance is forced to 0; if prompt_embedding_path is set it is still used, otherwise zero text embeddings are used."""
 
     show_control_condition: bool = False
     """Concatenate control videos and masks to the output video. Controls are stored separately in the output directory, regardless of this setting."""
@@ -521,9 +523,13 @@ class InferenceArguments(CommonInferenceArguments):
     # pyrefly: ignore  # bad-override
     negative_prompt: str = DEFAULT_NEGATIVE_PROMPT
     """Negative prompt - describing what you don't want in the generated video."""
+    negative_prompt_embedding_path: ResolvedFilePath | None = None
+    """Path to a precomputed negative prompt embedding tensor (.pt/.pth/.npy/.npz). If provided, online text encoding is skipped for the negative branch."""
     # pyrefly: ignore  # bad-override
-    prompt: str
-    """Text prompt describing generation. Only one of {prompt} or {prompt_path} should be provided. """
+    prompt: str | None = None
+    """Text prompt describing generation. Optional when {control_only} is True or {prompt_embedding_path} is provided."""
+    prompt_embedding_path: ResolvedFilePath | None = None
+    """Path to a precomputed positive prompt embedding tensor (.pt/.pth/.npy/.npz). If provided, online text encoding is skipped for the positive branch."""
 
     guided_generation_mask: ResolvedFilePath | ResolvedDirectoryPath | None = None
     """ Path to guided generation mask. If None, guided generation is not used.
@@ -545,6 +551,17 @@ class InferenceArguments(CommonInferenceArguments):
         if "vis" in self.hint_keys and self.image_context_path:
             raise ValueError(
                 "vis control and image_context_path are both used to transfer style. Using these modes together leads to conflicts. Please only provide one"
+            )
+        if not self.control_only and not (self.prompt or self.prompt_embedding_path):
+            raise ValueError("prompt, prompt_path, or prompt_embedding_path is required unless control_only=True")
+        if (
+            "seg" in self.hint_keys
+            and getattr(self, "seg").control_path is None
+            and getattr(self, "seg").control_prompt is None
+            and not self.prompt
+        ):
+            raise ValueError(
+                "seg.control_prompt is required when prompt is omitted and segmentation control is generated on the fly"
             )
 
     @cached_property
@@ -583,6 +600,8 @@ class InferenceArguments(CommonInferenceArguments):
             return None
         if getattr(self, "seg").control_prompt is not None:
             return getattr(self, "seg").control_prompt
+        if not self.prompt:
+            return None
         default_prompt = " ".join(self.prompt.split()[:128])
         log.warning(
             f'No "control_prompt" provided for on-the-fly segmentation, using the first 128 words of the input prompt'
@@ -592,6 +611,15 @@ class InferenceArguments(CommonInferenceArguments):
     @cached_property
     def not_keep_input_resolution(self) -> bool:
         return not self.keep_input_resolution
+
+    def can_skip_text_encoder(self, is_distilled: bool = False) -> bool:
+        """Return whether this sample can run without initializing the online text encoder."""
+        has_positive_condition = self.control_only or self.prompt_embedding_path is not None
+        if not has_positive_condition:
+            return False
+        if is_distilled or self.control_only or self.guidance == 0:
+            return True
+        return self.negative_prompt_embedding_path is not None
 
 
 InferenceOverrides = get_overrides_cls(

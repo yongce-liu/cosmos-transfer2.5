@@ -528,6 +528,14 @@ class GeneralConditioner(nn.Module, ABC):
         un_condition: Any = self(data_batch, override_dropout_rate=dropout_rates)
         return condition, un_condition
 
+    def get_condition(
+        self,
+        data_batch: Dict,
+    ) -> Any:
+        """Get the fully-conditioned path without constructing an unconditional branch."""
+        cond_dropout_rates = {emb_name: 0.0 for emb_name in self.embedders}
+        return self(data_batch, override_dropout_rate=cond_dropout_rates)
+
     def get_condition_with_negative_prompt(
         self,
         data_batch: Dict,

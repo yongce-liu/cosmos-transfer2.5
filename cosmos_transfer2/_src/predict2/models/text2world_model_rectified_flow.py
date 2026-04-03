@@ -469,9 +469,7 @@ class Text2WorldModelRectifiedFlow(ImaginaireModel):
             condition, uncondition = self.conditioner.get_condition_uncondition(data_batch)
 
         condition = condition.edit_data_type(DataType.IMAGE if is_image_batch else DataType.VIDEO)
-        uncondition = uncondition.edit_data_type(DataType.IMAGE if is_image_batch else DataType.VIDEO)
         _, condition, _, _ = self.broadcast_split_for_model_parallelsim(x0, condition, None, None)
-        _, uncondition, _, _ = self.broadcast_split_for_model_parallelsim(x0, uncondition, None, None)
 
         # For inference, check if parallel_state is initialized
         if parallel_state.is_initialized():
@@ -480,6 +478,16 @@ class Text2WorldModelRectifiedFlow(ImaginaireModel):
             assert not self.net.is_context_parallel_enabled, (
                 "parallel_state is not initialized, context parallel should be turned off."
             )
+
+        if guidance == 0:
+
+            def velocity_fn(noise: torch.Tensor, noise_x: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
+                return self.denoise(noise, noise_x, timestep, condition)
+
+            return velocity_fn
+
+        uncondition = uncondition.edit_data_type(DataType.IMAGE if is_image_batch else DataType.VIDEO)
+        _, uncondition, _, _ = self.broadcast_split_for_model_parallelsim(x0, uncondition, None, None)
 
         def velocity_fn(noise: torch.Tensor, noise_x: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
             cond_v = self.denoise(noise, noise_x, timestep, condition)

@@ -240,14 +240,20 @@ class ControlVideo2WorldModel(Video2WorldModel):
         else:
             num_conditional_frames = 0
 
-        if is_negative_prompt:
+        use_cfg = guidance > 0
+
+        if use_cfg and is_negative_prompt:
             condition, uncondition = self.conditioner.get_condition_with_negative_prompt(data_batch)
-        else:
+        elif use_cfg:
             condition, uncondition = self.conditioner.get_condition_uncondition(data_batch)
+        else:
+            condition = self.conditioner.get_condition(data_batch)
+            uncondition = None
 
         is_image_batch = self.is_image_batch(data_batch)
         condition = condition.edit_data_type(DataType.IMAGE if is_image_batch else DataType.VIDEO)
-        uncondition = uncondition.edit_data_type(DataType.IMAGE if is_image_batch else DataType.VIDEO)
+        if uncondition is not None:
+            uncondition = uncondition.edit_data_type(DataType.IMAGE if is_image_batch else DataType.VIDEO)
         _, x0, control_condition = self.get_data_and_condition(data_batch)
 
         # Set video condition
@@ -257,24 +263,27 @@ class ControlVideo2WorldModel(Video2WorldModel):
             random_max_num_conditional_frames=self.config.max_num_conditional_frames,
             num_conditional_frames=num_conditional_frames,
         )
-        uncondition = uncondition.set_video_condition(
-            gt_frames=x0,
-            random_min_num_conditional_frames=self.config.min_num_conditional_frames,
-            random_max_num_conditional_frames=self.config.max_num_conditional_frames,
-            num_conditional_frames=num_conditional_frames,
-        )
+        if uncondition is not None:
+            uncondition = uncondition.set_video_condition(
+                gt_frames=x0,
+                random_min_num_conditional_frames=self.config.min_num_conditional_frames,
+                random_max_num_conditional_frames=self.config.max_num_conditional_frames,
+                num_conditional_frames=num_conditional_frames,
+            )
 
         latent_control_input = control_condition.latent_control_input
         control_weight = control_condition.control_context_scale
         condition = condition.set_control_condition(
             latent_control_input=latent_control_input, control_weight=control_weight
         )
-        uncondition = uncondition.set_control_condition(
-            latent_control_input=latent_control_input, control_weight=control_weight
-        )
+        if uncondition is not None:
+            uncondition = uncondition.set_control_condition(
+                latent_control_input=latent_control_input, control_weight=control_weight
+            )
 
         _, condition, _, _ = self.broadcast_split_for_model_parallelsim(x0, condition, None, None)
-        _, uncondition, _, _ = self.broadcast_split_for_model_parallelsim(x0, uncondition, None, None)
+        if uncondition is not None:
+            _, uncondition, _, _ = self.broadcast_split_for_model_parallelsim(x0, uncondition, None, None)
 
         if parallel_state.is_initialized():
             pass
@@ -288,6 +297,14 @@ class ControlVideo2WorldModel(Video2WorldModel):
 
         def x0_fn(noise_x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
             noise_x = noise_x.to(**self.tensor_kwargs)
+            if not use_cfg:
+                raw_x0 = self.denoise(noise_x, sigma, condition).x0
+                if "guided_image" in data_batch:
+                    assert "guided_mask" in data_batch, "guided_mask should be in data_batch if guided_image is present"
+                    guide_image = data_batch["guided_image"]
+                    guide_mask = data_batch["guided_mask"]
+                    raw_x0 = guide_mask * guide_image + (1 - guide_mask) * raw_x0
+                return raw_x0
             """
             Use CFG parallel with 2 independent CP groups, each performing one denoising step.
             It allows for better scaling, as we get an additional 2x scaling increase. For example if standard

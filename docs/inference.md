@@ -126,6 +126,52 @@ Parameters can be specified as json:
 }
 ```
 
+### Low-VRAM Sim-Real Transfer
+
+For sim-to-real style transfer driven primarily by control inputs such as depth or edge, you can disable text conditioning entirely:
+
+```jsonc
+{
+    "name": "robot_edge_sim_real",
+    "video_path": "/path/to/input/robot_input.mp4",
+    "control_only": true,
+    "guidance": 0,
+    "edge": {
+        "control_path": "/path/to/edge/robot_edge.mp4",
+        "control_weight": 1.0
+    }
+}
+```
+
+`control_only=true` skips initializing the online text encoder for fully control-only batches, disables classifier-free guidance, and uses deterministic zero text embeddings. This reduces GPU memory usage substantially for control-driven sim-real transfer while keeping the structure/style anchored to the control video and image context.
+
+If you still want a fixed "realistic video" style prior without paying the online text encoder memory cost at inference time, you can precompute a prompt embedding offline and point inference to it:
+
+```bash
+uv run --project . python examples/precompute_text_embeddings.py \
+  --model edge \
+  --prompt "A realistic handheld robot video with natural lighting, camera noise, real-world materials, and photorealistic textures." \
+  --negative-prompt "cartoonish frames, fake lighting, primitive geometry, outdated game graphics" \
+  --output-dir ./embeddings
+```
+
+Then use the exported tensor in your inference JSON:
+
+```jsonc
+{
+    "name": "robot_edge_sim_real",
+    "video_path": "/path/to/input/robot_input.mp4",
+    "control_only": true,
+    "prompt_embedding_path": "./embeddings/prompt_embedding.pt",
+    "edge": {
+        "control_path": "/path/to/edge/robot_edge.mp4",
+        "control_weight": 1.0
+    }
+}
+```
+
+For non-control-only runs, you can also provide `negative_prompt_embedding_path` to avoid online text encoding for the negative branch.
+
 If you would like the control inputs to only be used for some regions, you can define binary spatiotemporal masks with the corresponding control input modality in mp4 format. White pixels means the control will be used in that region, whereas black pixels will not. Example below:
 
 

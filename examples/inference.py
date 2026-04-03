@@ -74,7 +74,13 @@ def main(
 
     from cosmos_transfer2.inference import Control2WorldInference
 
-    inference = Control2WorldInference(args.setup, batch_hint_keys=batch_hint_keys)
+    inference = Control2WorldInference(
+        args.setup,
+        batch_hint_keys=batch_hint_keys,
+        disable_text_encoder=all(
+            sample.can_skip_text_encoder(is_distilled=args.setup.model_key.distilled) for sample in inference_samples
+        ),
+    )
     inference.generate(inference_samples, output_dir=args.setup.output_dir)
 
 

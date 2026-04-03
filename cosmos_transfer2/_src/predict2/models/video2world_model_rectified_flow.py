@@ -170,7 +170,6 @@ class Video2WorldModelRectifiedFlow(Text2WorldModelRectifiedFlow):
 
         is_image_batch = self.is_image_batch(data_batch)
         condition = condition.edit_data_type(DataType.IMAGE if is_image_batch else DataType.VIDEO)
-        uncondition = uncondition.edit_data_type(DataType.IMAGE if is_image_batch else DataType.VIDEO)
         _, x0, _ = self.get_data_and_condition(data_batch)
         # override condition with inference mode; num_conditional_frames used Here!
         condition = condition.set_video_condition(
@@ -180,20 +179,9 @@ class Video2WorldModelRectifiedFlow(Text2WorldModelRectifiedFlow):
             num_conditional_frames=num_conditional_frames,
             conditional_frames_probs=self.config.conditional_frames_probs,
         )
-        uncondition = uncondition.set_video_condition(
-            gt_frames=x0,
-            random_min_num_conditional_frames=self.config.min_num_conditional_frames,
-            random_max_num_conditional_frames=self.config.max_num_conditional_frames,
-            num_conditional_frames=num_conditional_frames,
-            conditional_frames_probs=self.config.conditional_frames_probs,
-        )
         condition = condition.edit_for_inference(is_cfg_conditional=True, num_conditional_frames=num_conditional_frames)
-        uncondition = uncondition.edit_for_inference(
-            is_cfg_conditional=False, num_conditional_frames=num_conditional_frames
-        )
 
         _, condition, _, _ = self.broadcast_split_for_model_parallelsim(x0, condition, None, None)
-        _, uncondition, _, _ = self.broadcast_split_for_model_parallelsim(x0, uncondition, None, None)
 
         if parallel_state.is_initialized():
             pass
@@ -201,6 +189,26 @@ class Video2WorldModelRectifiedFlow(Text2WorldModelRectifiedFlow):
             assert not self.net.is_context_parallel_enabled, (
                 "parallel_state is not initialized, context parallel should be turned off."
             )
+
+        if guidance == 0:
+
+            def velocity_fn(noise: torch.Tensor, noise_x: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
+                return self.denoise(noise, noise_x, timestep, condition)
+
+            return velocity_fn
+
+        uncondition = uncondition.edit_data_type(DataType.IMAGE if is_image_batch else DataType.VIDEO)
+        uncondition = uncondition.set_video_condition(
+            gt_frames=x0,
+            random_min_num_conditional_frames=self.config.min_num_conditional_frames,
+            random_max_num_conditional_frames=self.config.max_num_conditional_frames,
+            num_conditional_frames=num_conditional_frames,
+            conditional_frames_probs=self.config.conditional_frames_probs,
+        )
+        uncondition = uncondition.edit_for_inference(
+            is_cfg_conditional=False, num_conditional_frames=num_conditional_frames
+        )
+        _, uncondition, _, _ = self.broadcast_split_for_model_parallelsim(x0, uncondition, None, None)
 
         def velocity_fn(noise: torch.Tensor, noise_x: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
             cond_v = self.denoise(noise, noise_x, timestep, condition)
