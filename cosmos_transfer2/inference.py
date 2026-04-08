@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import math
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +39,15 @@ from cosmos_transfer2.config import (
 )
 
 SINGLEVIEW_NUM_ATTENTION_HEADS = 16
+
+
+def _copy_input_video_to_output_dir(input_video_path: Path, output_path: Path) -> Path | None:
+    input_video_copy_path = output_path.with_name(f"{output_path.name}_input{input_video_path.suffix}")
+    if input_video_copy_path.resolve() == input_video_path.resolve():
+        log.warning(f"Skipping input video copy because source and destination are the same: {input_video_path}")
+        return None
+    shutil.copy2(input_video_path, input_video_copy_path)
+    return input_video_copy_path
 
 
 class Control2WorldInference:
@@ -407,6 +417,10 @@ class Control2WorldInference:
             prompt_save_path = f"{output_path}.txt"
             with open(prompt_save_path, "w") as f:
                 f.write(prompt)
+            if ext == "mp4":
+                copied_input_video_path = _copy_input_video_to_output_dir(sample.video_path, output_path)
+                if copied_input_video_path is not None:
+                    log.info(f"Copied input video to {copied_input_video_path}")
             log.success(f"Generated video saved to {output_path}.{ext}")
 
         if sample_id == 0 and self.setup_args.benchmark:

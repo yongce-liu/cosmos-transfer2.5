@@ -94,7 +94,7 @@ dev = [
 gradio = ["cosmos-gradio==0.1.0"]
 # Match nvcr.io/nvidia/pytorch:25.10-py3
 cu128_torch27 = [
-  "cosmos-cuda", # Sentinel package
+  "cosmos-cuda",               # Sentinel package
   "decord>=0.6.0",
   "flash-attn==2.7.3",
   "natten==0.21.0",
@@ -124,7 +124,7 @@ cu128_torch27 = [
 ]
 # Match nvcr.io/nvidia/pytorch:25.10-py3
 cu130_torch29 = [
-  "cosmos-cuda", # Sentinel package
+  "cosmos-cuda",               # Sentinel package
   "decord>=0.6.0",
   "flash-attn==2.7.4.post1",
   "natten==0.21.0",
@@ -137,7 +137,7 @@ cu130_torch29 = [
   # Disabled for cu130/torch29 in this workspace because RTX 5090 (cc 12.0) can dispatch into a
   # broken xFormers Hopper kernel path during inference. PyTorch native SDPA backends remain
   # available without it.
-  # "xformers; platform_machine != 'aarch64'",
+  "xformers; platform_machine != 'aarch64'",
   # Dependencies determined from 'uv pip install "torch==2.9.0" --index-url https://download.pytorch.org/whl/cu130'
   # Issue: https://github.com/astral-sh/uv/issues/14237
   "nvidia-cublas==13.0.0.19",
@@ -158,12 +158,7 @@ cu130_torch29 = [
 ]
 
 [tool.uv]
-conflicts = [
-  [
-    {extra = "cu128_torch27"},
-    {extra = "cu130_torch29"},
-  ],
-]
+conflicts = [[{ extra = "cu128_torch27" }, { extra = "cu130_torch29" }]]
 override-dependencies = ["numpy>=2.0.0"]
 
 [tool.uv.sources]
@@ -200,7 +195,7 @@ triton = [
 ]
 xformers = [
   { index = "cosmos-cu128-torch27", extra = "cu128_torch27" },
-  # { index = "cosmos-cu130-torch29", extra = "cu130_torch29" },
+  { index = "cosmos-cu130-torch29", extra = "cu130_torch29" },
 ]
 
 [[tool.uv.index]]
@@ -217,14 +212,8 @@ explicit = true
 path = "cosmos_oss/__about__.py"
 
 [tool.hatch.build.targets.sdist]
-packages = [
-  "cosmos_oss",
-]
+packages = ["cosmos_oss"]
 
 [tool.hatch.build.targets.wheel]
-packages = [
-  "cosmos_oss",
-]
-exclude = [
-  "*_test.py",
-]
+packages = ["cosmos_oss"]
+exclude = ["*_test.py"]
