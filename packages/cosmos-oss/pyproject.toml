@@ -198,7 +198,7 @@ triton = [
 ]
 xformers = [
   { index = "cosmos-cu128-torch27", extra = "cu128_torch27" },
-  # { index = "cosmos-cu130-torch29", extra = "cu130_torch29" },
+  { index = "cosmos-cu130-torch29", extra = "cu130_torch29" },
 ]
 
 [[tool.uv.index]]
