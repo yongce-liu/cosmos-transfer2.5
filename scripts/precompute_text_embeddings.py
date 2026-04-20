@@ -145,7 +145,11 @@ def _load_model_text_encoder_config(
 ) -> tuple[str, object | None]:
     config_module = get_config_module(resolved_config_file)
     config = importlib.import_module(config_module).make_config()
-    config = override(config, ["--", f"experiment={registered_exp_name}"] + exp_override_opts)
+    # Drop data_train: training-only configs (often S3-backed) are not needed to
+    # resolve the text encoder and may not be registered in inference environments.
+    filtered_opts = [o for o in exp_override_opts if not o.startswith("data_train=")]
+    overrides = ["--", f"experiment={registered_exp_name}", "~data_train"] + filtered_opts
+    config = override(config, overrides)
     model_config = config.model.config
     return model_config.text_encoder_class, model_config.text_encoder_config
 
