@@ -26,8 +26,6 @@ from cosmos_oss.init import cleanup_environment, init_environment
 
 from cosmos_transfer2._src.imaginaire.utils import log
 from cosmos_transfer2._src.imaginaire.utils.config_helper import get_config_module, override
-from cosmos_transfer2._src.predict2.inference.get_t5_emb import get_text_embedding, offload_text_encoder
-from cosmos_transfer2._src.predict2.text_encoders.text_encoder import TextEncoder
 from cosmos_transfer2._src.transfer2.configs.vid2vid_transfer.experiment.experiment_list import EXPERIMENTS
 from cosmos_transfer2.config import (
     DEFAULT_MODEL_KEY,
@@ -117,7 +115,7 @@ def _resolve_output_dtype(dtype_name: TensorDType) -> torch.dtype:
 
 def _resolve_model_config(
     model_name: str, experiment_override: str | None, config_file_override: str
-) -> tuple[str, str, str, object | None]:
+) -> tuple[str, str, str, list[str]]:
     model_key = MODEL_KEYS[model_name]
     checkpoint = MODEL_CHECKPOINTS[model_key]
     resolved_experiment = experiment_override or checkpoint.experiment
@@ -137,11 +135,19 @@ def _resolve_model_config(
         registered_exp_name = EXPERIMENTS[resolved_experiment].registered_exp_name
         exp_override_opts = EXPERIMENTS[resolved_experiment].command_args.copy()
 
+    return resolved_experiment, resolved_config_file, registered_exp_name, exp_override_opts
+
+
+def _load_model_text_encoder_config(
+    resolved_config_file: str,
+    registered_exp_name: str,
+    exp_override_opts: list[str],
+) -> tuple[str, object | None]:
     config_module = get_config_module(resolved_config_file)
     config = importlib.import_module(config_module).make_config()
     config = override(config, ["--", f"experiment={registered_exp_name}"] + exp_override_opts)
     model_config = config.model.config
-    return resolved_experiment, resolved_config_file, model_config.text_encoder_class, model_config.text_encoder_config
+    return model_config.text_encoder_class, model_config.text_encoder_config
 
 
 def _compute_embeddings(
@@ -152,6 +158,8 @@ def _compute_embeddings(
     cache_dir: str | None,
 ) -> torch.Tensor:
     if encoder_class == "T5":
+        from cosmos_transfer2._src.predict2.inference.get_t5_emb import get_text_embedding
+
         return get_text_embedding(
             prompt_text,
             device=device,
@@ -164,6 +172,8 @@ def _compute_embeddings(
 
     if encoder_config is None:
         raise ValueError(f"text_encoder_config is required to compute embeddings for {encoder_class}.")
+
+    from cosmos_transfer2._src.predict2.text_encoders.text_encoder import TextEncoder
 
     encoder_config = copy.deepcopy(encoder_config)
     encoder_config.compute_online = True
@@ -215,14 +225,29 @@ def main(args: Args) -> None:
     negative_prompt_text = _load_prompt_text(args.negative_prompt, args.negative_prompt_path)
     output_dtype = _resolve_output_dtype(args.dtype)
 
-    resolved_experiment, resolved_config_file, model_encoder_class, encoder_config = _resolve_model_config(
+    resolved_experiment, resolved_config_file, registered_exp_name, exp_override_opts = _resolve_model_config(
         model_name=args.model,
         experiment_override=args.experiment,
         config_file_override=args.config_file,
     )
 
+    model_encoder_class: str | None = None
+    encoder_config: object | None = None
+    needs_model_text_encoder_config = args.text_encoder_class == "auto" or args.text_encoder_class != "T5"
+
+    if needs_model_text_encoder_config:
+        model_encoder_class, encoder_config = _load_model_text_encoder_config(
+            resolved_config_file=resolved_config_file,
+            registered_exp_name=registered_exp_name,
+            exp_override_opts=exp_override_opts,
+        )
+
     resolved_encoder_class = model_encoder_class if args.text_encoder_class == "auto" else args.text_encoder_class
-    if args.text_encoder_class != "auto" and args.text_encoder_class != model_encoder_class:
+    if (
+        args.text_encoder_class != "auto"
+        and model_encoder_class is not None
+        and args.text_encoder_class != model_encoder_class
+    ):
         log.warning(
             f"Requested text_encoder_class={args.text_encoder_class}, while model {args.model} resolves to {model_encoder_class}."
         )
@@ -275,6 +300,8 @@ def main(args: Args) -> None:
         )
 
     if resolved_encoder_class == "T5":
+        from cosmos_transfer2._src.predict2.inference.get_t5_emb import offload_text_encoder
+
         offload_text_encoder(device="cpu")
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
