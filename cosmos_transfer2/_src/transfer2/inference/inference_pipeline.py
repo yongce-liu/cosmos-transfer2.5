@@ -646,9 +646,14 @@ class ControlVideo2WorldInference:
             # For first chunk, use zeros as input (after normalization it is 0)
             prev_output = torch.zeros_like(input_frames[:, :num_video_frames_per_chunk]).to(torch.uint8).cuda()[None]
 
-            output_writer = IncrementalVideoWriter(stream_output_path, fps=fps) if stream_output_path else None
+            output_writer = (
+                IncrementalVideoWriter(stream_output_path, fps=fps, max_frames=num_total_frames)
+                if stream_output_path
+                else None
+            )
             control_writers = {
-                key: IncrementalVideoWriter(path, fps=fps) for key, path in (stream_control_paths or {}).items()
+                key: IncrementalVideoWriter(path, fps=fps, max_frames=num_total_frames)
+                for key, path in (stream_control_paths or {}).items()
             }
 
         # --------Start of chunk-wise long video generation--------

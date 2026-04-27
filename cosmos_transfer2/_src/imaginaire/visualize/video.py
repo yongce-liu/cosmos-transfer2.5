@@ -41,7 +41,13 @@ def save_video(grid, video_name, fps=30):
 class IncrementalVideoWriter:
     """Append frames to a local MP4 file without materializing the full video in memory."""
 
-    def __init__(self, output_path: str | Path, fps: int = 24, ffmpeg_params: list[str] | None = None):
+    def __init__(
+        self,
+        output_path: str | Path,
+        fps: int = 24,
+        ffmpeg_params: list[str] | None = None,
+        max_frames: int | None = None,
+    ):
         import imageio.v2 as imageio
 
         self.output_path = str(output_path)
@@ -53,10 +59,15 @@ class IncrementalVideoWriter:
             macro_block_size=None,
             ffmpeg_params=ffmpeg_params or ["-crf", "18", "-preset", "slow"],
         )
+        self.max_frames = max_frames
+        self._frames_written = 0
 
     def append(self, sample_C_T_H_W_in01: Tensor) -> None:
         """Append a chunk shaped as (C, T, H, W) in [0, 1] or uint8."""
         assert sample_C_T_H_W_in01.ndim == 4, "Only support 4D tensor"
+
+        if self.max_frames is not None and self._frames_written >= self.max_frames:
+            return
 
         if torch.is_floating_point(sample_C_T_H_W_in01):
             frames = rearrange(
@@ -67,8 +78,16 @@ class IncrementalVideoWriter:
             assert sample_C_T_H_W_in01.dtype == torch.uint8, "Only support uint8 tensor"
             frames = rearrange(sample_C_T_H_W_in01.cpu().numpy(), "c t h w -> t h w c")
 
+        if self.max_frames is not None:
+            remaining = self.max_frames - self._frames_written
+            if remaining <= 0:
+                return
+            if frames.shape[0] > remaining:
+                frames = frames[:remaining]
+
         for frame in frames:
             self._writer.append_data(frame)
+        self._frames_written += frames.shape[0]
 
     def close(self) -> None:
         self._writer.close()
