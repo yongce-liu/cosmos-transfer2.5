@@ -924,6 +924,10 @@ def read_and_process_control_input(
             "interpolation": cv2.INTER_NEAREST,
             "fallback_msg": "No segmentation control input file found, computing now using SAM2..",
         },
+        "flow": {
+            "interpolation": cv2.INTER_LINEAR,
+            "fallback_msg": "No optical flow control input file found, computing now using RAFT..",
+        },
         "inpaint": {
             "interpolation": cv2.INTER_LINEAR,
             "fallback_msg": None,
@@ -1025,6 +1029,48 @@ def read_and_process_control_input(
                     ).cpu()
 
                 control_input_dict[control_key] = compute_or_load_shared_control_tensor(cache_path, compute_depth)
+            elif modality == "flow":
+                cache_path = build_control_cache_path(
+                    video_path=video_path,
+                    modality=modality,
+                    resolution=resolution,
+                    max_frames=max_frames,
+                )
+
+                def compute_flow() -> torch.Tensor | None:
+                    from cosmos_transfer2._src.transfer2.auxiliary.optical_flow.raft_flow_model import (
+                        compute_flow_visualization,
+                    )
+
+                    if input_video_frames is not None:
+                        log.info("Reusing preprocessed input frames for on-the-fly flow computation.")
+                        frames_cthw = input_video_frames.cpu().numpy().astype(np.uint8, copy=False)
+                    else:
+                        video_frames, _ = read_video_or_image_into_frames_BCTHW(
+                            video_path,
+                            H=None,
+                            W=None,
+                            normalize=False,
+                            max_frames=control_read_max_frames,
+                            also_return_fps=True,
+                            s3_credential_path=s3_credential_path,
+                        )
+                        if isinstance(video_frames, torch.Tensor):
+                            frames_cthw = video_frames[0].cpu().numpy().astype(np.uint8, copy=False)
+                        else:
+                            frames_cthw = video_frames[0].astype(np.uint8, copy=False)
+
+                    flow_rgb = compute_flow_visualization(frames_cthw)  # (3, T, H, W) uint8
+                    flow_tensor = torch.from_numpy(flow_rgb)
+                    if input_video_frames is not None:
+                        return flow_tensor.cpu()
+                    return _resize_to_target_resolution(
+                        flow_tensor,
+                        resolution=resolution,
+                        interpolation=config["interpolation"],
+                    ).cpu()
+
+                control_input_dict[control_key] = compute_or_load_shared_control_tensor(cache_path, compute_flow)
 
         control_mask_path = input_control_paths.get(f"{modality}_mask")
         mask_prompt = input_control_paths.get(f"{modality}_mask_prompt")

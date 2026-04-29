@@ -476,7 +476,14 @@ class SegConfig(ControlConfig):
     Default: first 128 words of the input prompt."""
 
 
-CONTROL_KEYS = ["edge", "vis", "depth", "seg"]
+class FlowConfig(ControlConfig):
+    """Arguments for optical-flow control. These can only be provided via the json input file."""
+
+    control_path: ResolvedFilePath | None = None
+    """Path to pre-computed flow visualization video (HSV-encoded RGB). If None, flow is generated on-the-fly from input video using RAFT."""
+
+
+CONTROL_KEYS = ["edge", "vis", "depth", "seg", "flow"]
 
 
 class InferenceArguments(CommonInferenceArguments):
@@ -517,6 +524,7 @@ class InferenceArguments(CommonInferenceArguments):
     depth: DepthConfig | None = None
     vis: BlurConfig | None = None
     seg: SegConfig | None = None
+    flow: FlowConfig | None = None
 
     seed: int = 2025
     "Seed for generation randomness."
@@ -546,7 +554,9 @@ class InferenceArguments(CommonInferenceArguments):
 
     def model_post_init(self, __context) -> None:
         if len(self.hint_keys) == 0:
-            raise ValueError("No controls provided, please provide at least one control key (edge, blur, depth, seg)")
+            raise ValueError(
+                "No controls provided, please provide at least one control key (edge, blur, depth, seg, flow)"
+            )
 
         if "vis" in self.hint_keys and self.image_context_path:
             raise ValueError(
@@ -630,5 +640,6 @@ InferenceOverrides = get_overrides_cls(
         "depth",
         "vis",
         "seg",
+        "flow",
     ],
 )

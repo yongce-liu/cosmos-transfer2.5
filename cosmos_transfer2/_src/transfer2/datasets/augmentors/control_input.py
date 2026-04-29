@@ -254,6 +254,58 @@ class AddControlInputBlur(Augmentor):
         return data_dict
 
 
+class AddControlInputFlow(Augmentor):
+    """
+    Add optical-flow control input to the data dictionary as a 3-channel RGB
+    visualization (HSV-encoded). Either consumes a pre-loaded "flow" tensor
+    (CTHW uint8 RGB visualization) from the data dict, or computes flow
+    on-the-fly from the input video using RAFT.
+    """
+
+    def __init__(
+        self,
+        input_keys: list,
+        output_keys: Optional[list] = ["control_input_flow"],
+        args: Optional[dict] = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(input_keys, output_keys, args)
+
+    def __call__(self, data_dict: dict) -> dict:
+        if "control_input_flow" in data_dict:
+            return data_dict
+
+        key_out = self.output_keys[0]
+
+        if "flow" in data_dict:
+            flow = data_dict["flow"]
+            frames = data_dict["video"]
+            _, _, H, W = frames.shape
+            flow = transforms_F.resize(
+                flow,
+                size=(H, W),
+                interpolation=transforms_F.InterpolationMode.BILINEAR,
+            )
+            data_dict[key_out] = flow
+            return data_dict
+
+        from cosmos_transfer2._src.transfer2.auxiliary.optical_flow.raft_flow_model import (
+            compute_flow_visualization,
+        )
+
+        frames = _maybe_torch_to_numpy(data_dict[self.input_keys[0]])  # (C, T, H, W) uint8
+        is_image = len(frames.shape) < 4
+        if is_image:
+            # Optical flow needs at least 2 frames; for a single image, return zeros.
+            flow_rgb = np.zeros_like(frames)
+            data_dict[key_out] = torch.from_numpy(flow_rgb)
+            return data_dict
+
+        flow_rgb = compute_flow_visualization(frames)  # (3, T, H, W) uint8
+        data_dict[key_out] = torch.from_numpy(flow_rgb)
+        return data_dict
+
+
 class AddControlInputDepth(Augmentor):
     """
     Add control input to the data dictionary. control input are expanded to 3-channels
@@ -539,6 +591,7 @@ CTRL_HINT_KEYS = {
     "control_input_vis": AddControlInputBlur,
     "control_input_depth": AddControlInputDepth,
     "control_input_seg": AddControlInputSeg,
+    "control_input_flow": AddControlInputFlow,
     "control_input_inpaint": AddControlInputIdentity,
     "control_input_hdmap_bbox": AddControlInputHdmapBbox,
 }

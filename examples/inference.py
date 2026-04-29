@@ -25,6 +25,7 @@ from cosmos_transfer2.config import (
     BlurConfig,
     DepthConfig,
     EdgeConfig,
+    FlowConfig,
     InferenceArguments,
     InferenceOverrides,
     SegConfig,
@@ -39,6 +40,7 @@ ControlUnion = Annotated[
         Annotated[DepthConfig, tyro.conf.subcommand("depth")],
         Annotated[BlurConfig, tyro.conf.subcommand("vis")],
         Annotated[SegConfig, tyro.conf.subcommand("seg")],
+        Annotated[FlowConfig, tyro.conf.subcommand("flow")],
     ],
     tyro.conf.ConsolidateSubcommandArgs,
 ]
