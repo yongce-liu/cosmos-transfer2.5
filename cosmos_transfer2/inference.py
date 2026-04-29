@@ -62,10 +62,19 @@ class Control2WorldInference:
         self.batch_hint_keys = batch_hint_keys
         self.is_distilled = args.model_key.distilled
 
+        def _resolve_checkpoint(variant: str) -> "CheckpointConfig":
+            model_key = ModelKey(variant=variant, distilled=self.is_distilled)  # pyrefly: ignore [bad-argument-type]
+            if model_key not in MODEL_CHECKPOINTS:
+                fallback_key = ModelKey(variant="edge", distilled=self.is_distilled)  # pyrefly: ignore [bad-argument-type]
+                log.warning(
+                    f"No checkpoint registered for variant '{variant}'. Falling back to 'edge' checkpoint."
+                )
+                return MODEL_CHECKPOINTS[fallback_key]
+            return MODEL_CHECKPOINTS[model_key]
+
         # Get checkpoint paths - same pattern for distilled and non-distilled
         if len(self.batch_hint_keys) == 1:
-            # pyrefly: ignore  # bad-argument-type
-            checkpoint = MODEL_CHECKPOINTS[ModelKey(variant=self.batch_hint_keys[0], distilled=self.is_distilled)]
+            checkpoint = _resolve_checkpoint(self.batch_hint_keys[0])
             self.checkpoint_list = [checkpoint.s3.uri]
             self.experiment = checkpoint.experiment
             if args.has_checkpoint_override:
@@ -77,12 +86,7 @@ class Control2WorldInference:
 
         else:
             # Multi-control: load ALL control modalities even if some have control weight = 0
-            self.checkpoint_list = [
-                MODEL_CHECKPOINTS[
-                    ModelKey(variant=key, distilled=self.is_distilled)  # pyrefly: ignore [bad-argument-type]
-                ].s3.uri
-                for key in CONTROL_KEYS
-            ]
+            self.checkpoint_list = [_resolve_checkpoint(key).s3.uri for key in CONTROL_KEYS]
             self.experiment = "multibranch_720p_t24_spaced_layer4_cr1pt1_rectified_flow_inference"
 
         torch.enable_grad(False)  # Disable gradient calculations for inference
