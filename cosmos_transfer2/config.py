@@ -480,7 +480,14 @@ class FlowConfig(ControlConfig):
     """Arguments for optical-flow control. These can only be provided via the json input file."""
 
     control_path: ResolvedFilePath | None = None
-    """Path to pre-computed flow visualization video (HSV-encoded RGB). If None, flow is generated on-the-fly from input video using RAFT."""
+    """Path to pre-computed flow visualization video (HSV-encoded RGB). If None, flow is generated on-the-fly from input video."""
+
+    flow_model: str = "waft"
+    """PTLFlow optical-flow model name. Legacy aliases 'raft', 'waft', and 'memflow' are supported.
+    Examples: 'raft', 'raft_small', 'memflow', 'memflow_t', 'sea_raft_l', 'waft_dav2_a2', 'gmflow'."""
+
+    flow_ckpt_path: str | None = None
+    """PTLFlow checkpoint name or local checkpoint path. If None, a pretrained default is selected (usually 'sintel')."""
 
 
 CONTROL_KEYS = ["edge", "vis", "depth", "seg", "flow"]
@@ -621,6 +628,20 @@ class InferenceArguments(CommonInferenceArguments):
     @cached_property
     def not_keep_input_resolution(self) -> bool:
         return not self.keep_input_resolution
+
+    @cached_property
+    def flow_model(self) -> str:
+        """Return the PTLFlow optical-flow model name from FlowConfig, or 'raft' by default."""
+        if "flow" in self.hint_keys:
+            return getattr(self, "flow").flow_model
+        return "raft"
+
+    @cached_property
+    def flow_ckpt_path(self) -> str | None:
+        """Return the PTLFlow checkpoint name/path from FlowConfig, or None for the model default."""
+        if "flow" in self.hint_keys:
+            return getattr(self, "flow").flow_ckpt_path
+        return None
 
     def can_skip_text_encoder(self, is_distilled: bool = False) -> bool:
         """Return whether this sample can run without initializing the online text encoder."""

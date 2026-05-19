@@ -875,6 +875,8 @@ def read_and_process_control_input(
     s3_credential_path: str | None = None,
     max_frames: int | None = None,
     input_video_frames: torch.Tensor | None = None,
+    flow_model: str = "raft",
+    flow_ckpt_path: str | None = None,
 ):
     """
     Load or compute control inputs for video transfer.
@@ -895,6 +897,8 @@ def read_and_process_control_input(
         input_video_frames: Already-loaded input video frames in (C, T, H, W) uint8 format.
             When provided, on-the-fly depth reuses these resized frames instead of loading
             the full source video again.
+        flow_model: PTLFlow optical-flow model name, or legacy alias.
+        flow_ckpt_path: PTLFlow checkpoint name or local checkpoint path.
 
     Returns:
         Tuple of (control_input_dict, mask_video_dict) where mask_video_dict contains
@@ -926,7 +930,10 @@ def read_and_process_control_input(
         },
         "flow": {
             "interpolation": cv2.INTER_LINEAR,
-            "fallback_msg": "No optical flow control input file found, computing now using RAFT..",
+            "fallback_msg": (
+                "No optical flow control input file found, computing now using "
+                f"PTLFlow model={flow_model!r}, ckpt={flow_ckpt_path!r}.."
+            ),
         },
         "inpaint": {
             "interpolation": cv2.INTER_LINEAR,
@@ -1032,13 +1039,13 @@ def read_and_process_control_input(
             elif modality == "flow":
                 cache_path = build_control_cache_path(
                     video_path=video_path,
-                    modality=modality,
+                    modality=f"flow_{flow_model}_{flow_ckpt_path or 'default'}",
                     resolution=resolution,
                     max_frames=max_frames,
                 )
 
                 def compute_flow() -> torch.Tensor | None:
-                    from cosmos_transfer2._src.transfer2.auxiliary.optical_flow.raft_flow_model import (
+                    from cosmos_transfer2._src.transfer2.auxiliary.optical_flow import (
                         compute_flow_visualization,
                     )
 
@@ -1060,7 +1067,11 @@ def read_and_process_control_input(
                         else:
                             frames_cthw = video_frames[0].astype(np.uint8, copy=False)
 
-                    flow_rgb = compute_flow_visualization(frames_cthw)  # (3, T, H, W) uint8
+                    flow_rgb = compute_flow_visualization(
+                        frames_cthw,
+                        flow_model=flow_model,
+                        flow_ckpt_path=flow_ckpt_path,
+                    )  # (3, T, H, W) uint8
                     flow_tensor = torch.from_numpy(flow_rgb)
                     if input_video_frames is not None:
                         return flow_tensor.cpu()

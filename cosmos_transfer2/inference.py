@@ -208,6 +208,8 @@ class Control2WorldInference:
         sample_names = [sample.name for sample in samples]
         log.info(f"Generating {len(samples)} samples: {sample_names}")
 
+        self._prefetch_flow_models(samples)
+
         output_paths: list[str] = []
         for i_sample, sample in enumerate(samples):
             log.info(f"[{i_sample + 1}/{len(samples)}] Processing sample {sample.name}")
@@ -227,6 +229,30 @@ class Control2WorldInference:
                 log.info(f"{key}: {value:.2f} seconds")
             log.info("=" * 50)
         return output_paths
+
+    def _prefetch_flow_models(self, samples: list[InferenceArguments]) -> None:
+        """Pre-download PTLFlow checkpoints for any samples using flow control.
+
+        Mirrors the upfront checkpoint downloads done for the main model so that
+        flow weights are not fetched mid-inference on the first flow sample.
+        """
+        flow_specs: set[tuple[str, str | None]] = set()
+        for sample in samples:
+            if "flow" not in sample.hint_keys:
+                continue
+            flow_cfg = getattr(sample, "flow")
+            if flow_cfg.control_path is not None:
+                continue
+            flow_specs.add((sample.flow_model, sample.flow_ckpt_path))
+
+        if not flow_specs:
+            return
+
+        from cosmos_transfer2._src.transfer2.auxiliary.optical_flow import prefetch_ptlflow_model
+
+        for flow_model, flow_ckpt_path in sorted(flow_specs, key=lambda x: (x[0], x[1] or "")):
+            log.info(f"Prefetching PTLFlow model={flow_model!r}, ckpt={flow_ckpt_path!r}")
+            prefetch_ptlflow_model(flow_model, flow_ckpt_path)
 
     def _generate_sample(self, sample: InferenceArguments, output_dir: Path, sample_id: int = 0) -> str | None:
         log.debug(f"{sample.__class__.__name__}({sample})")
@@ -359,6 +385,8 @@ class Control2WorldInference:
                 stream_output=stream_output,
                 stream_output_path=stream_output_path,
                 stream_control_paths=stream_control_paths,
+                flow_model=sample.flow_model,
+                flow_ckpt_path=sample.flow_ckpt_path,
             )
             if self.setup_args.benchmark:
                 torch.cuda.synchronize()

@@ -44,7 +44,7 @@ WORKDIR /workspace
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=docker/nightly-requirements.txt,target=requirements.txt \
     --mount=type=bind,source=packages,target=packages \
-    uv pip install --system --break-system-packages -r requirements.txt
+    pip install --no-build-isolation -r requirements.txt
 
 RUN --mount=type=bind,source=packages,target=packages \
     pip install --no-deps packages/* && \

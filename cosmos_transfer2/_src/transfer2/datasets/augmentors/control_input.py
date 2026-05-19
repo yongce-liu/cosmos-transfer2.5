@@ -259,7 +259,7 @@ class AddControlInputFlow(Augmentor):
     Add optical-flow control input to the data dictionary as a 3-channel RGB
     visualization (HSV-encoded). Either consumes a pre-loaded "flow" tensor
     (CTHW uint8 RGB visualization) from the data dict, or computes flow
-    on-the-fly from the input video using RAFT.
+    on-the-fly from the input video using PTLFlow RAFT.
     """
 
     def __init__(
@@ -289,7 +289,7 @@ class AddControlInputFlow(Augmentor):
             data_dict[key_out] = flow
             return data_dict
 
-        from cosmos_transfer2._src.transfer2.auxiliary.optical_flow.raft_flow_model import (
+        from cosmos_transfer2._src.transfer2.auxiliary.optical_flow import (
             compute_flow_visualization,
         )
 

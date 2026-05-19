@@ -508,6 +508,8 @@ class ControlVideo2WorldInference:
         stream_output: bool = False,
         stream_output_path: str | None = None,
         stream_control_paths: dict[str, str] | None = None,
+        flow_model: str = "raft",
+        flow_ckpt_path: str | None = None,
     ) -> tuple[torch.Tensor | None, dict[str, torch.Tensor], dict[str, torch.Tensor], int, tuple[int, int]]:
         """
         Generates a video based on an input video and text prompt.
@@ -634,6 +636,8 @@ class ControlVideo2WorldInference:
                 seg_control_prompt=seg_control_prompt,
                 max_frames=max_frames,
                 input_video_frames=input_frames,
+                flow_model=flow_model,
+                flow_ckpt_path=flow_ckpt_path,
             )
 
             # -------- Stuff to handle chunk-wise long video generation --------
