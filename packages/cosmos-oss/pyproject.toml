@@ -152,6 +152,7 @@ cu130_torch29 = [
   "nvidia-nvjitlink==13.0.39",
   "nvidia-nvshmem-cu13==3.3.24",
   "nvidia-nvtx==13.0.39",
+  "pytz>=2025.2",
 ]
 
 [tool.uv]
