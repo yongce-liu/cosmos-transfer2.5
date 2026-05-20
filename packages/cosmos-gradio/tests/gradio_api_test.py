@@ -19,7 +19,6 @@
 #   python tests/gradio_api_test.py
 
 import pytest
-
 from tests.bootstrap_test_server import default_request
 from tests.gradio_test_harness import GradioTestHarness
 

@@ -17,6 +17,9 @@ from typing import Callable, Dict, Optional, Tuple
 
 import attrs
 import torch
+from cosmos_transfer2._src.predict2.configs.frame_interpolation.conditioner import (
+    InterpolatorCondition,  # type: ignore[missing-import]
+)
 from einops import rearrange
 from megatron.core import parallel_state
 from torch import Tensor
@@ -25,9 +28,6 @@ from cosmos_transfer2._src.imaginaire.modules.res_sampler import COMMON_SOLVER_O
 from cosmos_transfer2._src.imaginaire.utils import misc
 from cosmos_transfer2._src.imaginaire.utils.context_parallel import cat_outputs_cp, split_inputs_cp
 from cosmos_transfer2._src.predict2.conditioner import DataType
-from cosmos_transfer2._src.predict2.configs.frame_interpolation.conditioner import (
-    InterpolatorCondition,  # type: ignore[missing-import]
-)
 from cosmos_transfer2._src.predict2.models.denoise_prediction import DenoisePrediction
 from cosmos_transfer2._src.predict2.models.text2world_model_rectified_flow import (
     IS_PREPROCESSED_KEY,

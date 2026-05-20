@@ -316,10 +316,8 @@ class MultiviewInference:
                         for pixel_frames in num_conditional_frames
                     ]
                 else:
-                    num_conditional_latent_frames = (
-                        self.pipe.model.tokenizer.get_latent_num_frames(  # pyrefly: ignore # missing-attribute
-                            num_conditional_frames
-                        )
+                    num_conditional_latent_frames = self.pipe.model.tokenizer.get_latent_num_frames(  # pyrefly: ignore # missing-attribute
+                        num_conditional_frames
                     )
                 batch["num_conditional_frames"] = num_conditional_latent_frames
                 video = self.pipe.generate_from_batch(

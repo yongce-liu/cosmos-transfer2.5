@@ -18,7 +18,6 @@ import os
 import pickle
 
 import numpy as np
-
 from cosmos_transfer2._src.imaginaire.auxiliary.text_encoder import CosmosT5TextEncoder
 from cosmos_transfer2._src.imaginaire.constants import T5_MODEL_DIR
 
