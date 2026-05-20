@@ -22,8 +22,6 @@ from typing import Optional
 import numpy as np
 import torch
 
-from cosmos_transfer2._src.transfer2.auxiliary.depth_anything.model_utils import get_model_cache_path
-
 logger = logging.getLogger(__name__)
 
 try:
@@ -101,36 +99,26 @@ class VideoDepthAnythingModel:
 
     def _get_or_download_weights(self) -> str:
         """
-        Get weights from cache or download from HuggingFace.
+        Resolve weights path via the HuggingFace standard cache.
 
-        Returns:
-            Path to the weights file
+        ``hf_hub_download`` returns the existing cached file when present and
+        downloads it into the same HF cache (``HF_HUB_CACHE`` / ``HF_HOME``)
+        otherwise -- which matches the layout produced by
+        ``scripts/download_checkpoints.py`` and ``hf download``.
         """
-        cache_dir = get_model_cache_path(f"video_depth_anything_{self.encoder}")
-        weights_file = cache_dir / WEIGHTS_NAME[self.encoder]
+        from huggingface_hub import hf_hub_download
 
-        if weights_file.exists():
-            logger.info(f"Using cached weights: {weights_file}")
-            return str(weights_file)
-
-        # Try to download from HuggingFace
+        repo_id = HF_REPO[self.encoder]
+        filename = WEIGHTS_NAME[self.encoder]
         try:
-            from huggingface_hub import hf_hub_download
-
-            logger.info(f"Downloading weights from {HF_REPO[self.encoder]}")
-            downloaded_path = hf_hub_download(
-                repo_id=HF_REPO[self.encoder],
-                filename=WEIGHTS_NAME[self.encoder],
-                cache_dir=cache_dir,
-            )
-            logger.info(f"Downloaded weights to {downloaded_path}")
-            return downloaded_path
+            path = hf_hub_download(repo_id=repo_id, filename=filename)
+            logger.info(f"Resolved weights: {path}")
+            return path
         except Exception as e:
-            logger.error(f"Failed to download weights: {e}")
+            logger.error(f"Failed to fetch weights for {self.encoder}: {e}")
             raise RuntimeError(
                 f"Could not find or download weights for {self.encoder}. "
-                f"Please download manually from {HF_REPO[self.encoder]} "
-                f"and place at {weights_file}"
+                f"Please download manually from {repo_id} (file={filename})."
             ) from e
 
     def generate(self, video: np.ndarray) -> np.ndarray:
